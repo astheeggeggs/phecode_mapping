@@ -91,6 +91,50 @@ def test_phenotype_matrix_sex_restriction_and_exclusions(tmp_path: Path) -> None
     assert audit["phenotype_matrix"]["sex_restricted_retained_phecodes"] == 1
 
 
+def test_exclude_phenotypes_drops_whole_phecodes_from_every_output(tmp_path: Path) -> None:
+    source = tmp_path / "official.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [
+        ["AA_1", "123.4", "ICD9CM"],
+        ["BB_2", "A01.1", "ICD10CM"],
+    ])
+    info = tmp_path / "info.csv"
+    write_csv(info, ["phecode", "category"], [["AA_1", "Symptoms"], ["BB_2", "Cardiovascular"]])
+    release = tmp_path / "release"
+    build_vocabulary(source, info, release)
+
+    cohort = tmp_path / "cohort.csv"; events = tmp_path / "events.csv"; exclude = tmp_path / "exclude.csv"
+    write_csv(cohort, ["person_id"], [["p1"], ["p2"]])
+    write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "123.4", "ICD9CM"], ["p2", "A01.1", "ICD10CM"]])
+    write_csv(exclude, ["match_type", "match_value"], [["category", "Symptoms"]])
+    output = tmp_path / "run"
+    map_phecodes(release, cohort, events, output, min_cases=1, min_controls=1, exclude_phenotypes=exclude)
+
+    phecodes = duckdb.sql(f"SELECT DISTINCT phecode FROM read_parquet('{output / 'phecode_counts.parquet'}')").fetchall()
+    assert phecodes == [("BB_2",)]  # AA_1 (Symptoms) dropped entirely, not just excluded from controls
+    cases = duckdb.sql(f"SELECT phecode FROM read_parquet('{output / 'person_phecodes.parquet'}')").fetchall()
+    assert cases == [("BB_2",)]
+    matrix_cols = {r[0] for r in duckdb.sql(f"DESCRIBE SELECT * FROM read_parquet('{output / 'phenotype_matrix.parquet'}')").fetchall()}
+    assert matrix_cols == {"person_id", "BB_2"}
+    audit = json.loads((output / "audit.json").read_text())
+    assert audit["exclude_phenotypes"]["phecodes_excluded"] == 1
+
+
+def test_exclude_phenotypes_by_phecode_and_category_error_without_info(tmp_path: Path, release: Path) -> None:
+    cohort = tmp_path / "cohort.csv"; events = tmp_path / "events.csv"; exclude = tmp_path / "exclude.csv"
+    write_csv(cohort, ["person_id"], [["p1"]])
+    write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "123.4", "ICD9CM"]])
+    write_csv(exclude, ["match_type", "match_value"], [["phecode", "AA_1"]])
+    output = tmp_path / "run"
+    map_phecodes(release, cohort, events, output, min_cases=1, min_controls=1, exclude_phenotypes=exclude)
+    phecodes = duckdb.sql(f"SELECT DISTINCT phecode FROM read_parquet('{output / 'phecode_counts.parquet'}')").fetchall()
+    assert phecodes == []  # AA_1 was the only phecode with events; excluded by phecode-type rule
+
+    exclude_by_category = tmp_path / "exclude_category.csv"
+    write_csv(exclude_by_category, ["match_type", "match_value"], [["category", "Symptoms"]])
+    with pytest.raises(ValueError, match="no phecode_info.parquet"):
+        map_phecodes(release, cohort, events, tmp_path / "run2", exclude_phenotypes=exclude_by_category)
+
+
 def test_phenotype_matrix_warns_without_cohort_sex_column(tmp_path: Path, capsys) -> None:
     source = tmp_path / "official.csv"
     write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["AA_1", "123.4", "ICD9CM"]])

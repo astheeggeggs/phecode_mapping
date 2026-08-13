@@ -59,6 +59,16 @@ def main() -> None:
                       help="Optional CSV/Parquet (phecode, exclusion_type, exclusion_value, "
                            "[version]) removing people from a phecode's control pool. Cases are "
                            "never excluded.")
+    run.add_argument("--exclude-phenotypes", type=Path,
+                      help="Optional CSV/Parquet (match_type, match_value) dropping whole "
+                           "phecodes from every output (unlike --control-exclusions, which only "
+                           "adjusts other phecodes' control pools). match_type is 'category' "
+                           "(matched against the release's phecode_info 'category' column) or "
+                           "'phecode' (exact phecode). See "
+                           "phecodex_mapper/data/recommended_exclusions.csv for a starting point "
+                           "(phenotypes with poor genetic construct validity, e.g. non-specific "
+                           "symptom codes) -- review and extend it for your own analysis rather "
+                           "than using it unmodified.")
     run.add_argument("--min-cases", type=int, default=200,
                       help="Minimum case count for a phecode to be marked retained (default: 200).")
     run.add_argument("--min-controls", type=int, default=200,
@@ -72,7 +82,7 @@ def main() -> None:
         if args.command == "build-vocabulary":
             build_vocabulary(args.phecodex_map, args.phecodex_info, args.output, args.athena_dir)
         else:
-            map_phecodes(args.release, args.cohort, args.events, args.output, args.case_rule, args.control_exclusions, args.min_cases, args.min_controls, args.max_unmapped_rate)
+            map_phecodes(args.release, args.cohort, args.events, args.output, args.case_rule, args.control_exclusions, args.min_cases, args.min_controls, args.max_unmapped_rate, args.exclude_phenotypes)
     except (ValueError, FileExistsError, FileNotFoundError, RuntimeError) as exc:
         # Known, user-actionable failures (bad input, existing output dir, unmapped-rate
         # threshold, ...) are reported as a single line; anything else surfaces as a full

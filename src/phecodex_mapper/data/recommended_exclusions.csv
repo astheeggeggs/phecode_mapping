@@ -1,0 +1,6 @@
+match_type,match_value,reason
+category,Symptoms,Non-specific sign/symptom codes (e.g. abdominal pain, malaise) rather than disease entities -- poor construct validity as a genetic phenotype
+category,Neonatal,Case status mostly reflects gestational age/obstetric circumstances rather than the child's own germline burden; also structurally confounded with maternal/pregnancy phecodes
+phecode,PP_P001,Administrative encounter code ("Supervision of pregnancy"), not a disease phenotype
+phecode,PP_P002,Administrative encounter code ("Labor and delivery"), not a disease phenotype
+phecode,PP_P003,Administrative encounter code ("Maternal postpartum care and examination"), not a disease phenotype

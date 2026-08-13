@@ -191,6 +191,38 @@ worked example of reshaping that into this `person_id, code, vocabulary`
 long format (it also de-identifies, if you need a test fixture — see
 [Data governance](#data-governance)).
 
+### `--exclude-phenotypes` (optional, `map-phecodes`)
+
+Drops whole phecodes from **every** output (`phecode_counts`,
+`person_phecodes`, `eligible_phecodes`, `phenotype_matrix`) — not just from
+other phecodes' control pools like `--control-exclusions` below. Use this to
+keep phenotypes with poor genetic construct validity for your analysis type
+out of the results entirely, rather than filtering them post hoc from
+thousands of output rows.
+
+| column | required | notes |
+|---|---|---|
+| `match_type` | yes | `"category"` (matched against the release's `phecode_info` `category` column — requires the release to have been built with a `--phecodex-info` file that has one) or `"phecode"` (exact phecode) |
+| `match_value` | yes | the category name or phecode to match |
+
+`phecodex_mapper/data/recommended_exclusions.csv` (bundled with this
+package) is a **starting point, not a complete answer** — for a rare-variant
+association analysis, it drops `Symptoms` (non-specific sign/symptom codes)
+and `Neonatal` (case status mostly reflects gestational age/obstetrics, not
+the child's own germline burden) wholesale, plus three purely administrative
+pregnancy-encounter phecodes (`PP_P001`–`PP_P003`). It deliberately does
+**not** attempt to hand-pick which `Infections` or clinical `Pregnancy`
+phecodes to drop — those need case-by-case clinical judgment (e.g. acute/
+environmentally-driven infections have little heritable signal, but
+monogenic-susceptibility infection phenotypes and genuinely heritable
+pregnancy complications like pre-eclampsia do) that shouldn't be baked into
+a shared default without review. Copy it and extend it for your own study
+rather than passing it through unmodified.
+
+`audit.json`'s `exclude_phenotypes.phecodes_excluded` records how many
+phecodes this removed, so a run's phenotype list can always be traced back
+to which filter produced it.
+
 ### `--control-exclusions` (optional, `map-phecodes`)
 
 Removes phecode-inappropriate people from the control pool for a given

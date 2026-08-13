@@ -21,7 +21,54 @@ def _xlsx(path: Path, headers: list[str], rows: list[tuple]) -> None:
     book.save(path)
 
 
-def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_rule: str = "any-event", exclusions: Path | None = None, min_cases: int = 200, min_controls: int = 200, max_unmapped_rate: float = 1.0) -> None:
+def _load_excluded_phecodes(con, release: Path, exclude_phenotypes: Path | None) -> int:
+    """Build the `excluded_phecodes` table: phecodes dropped from every output
+    (phecode_counts, person_phecodes, eligible_phecodes, phenotype_matrix)
+    entirely -- e.g. whole categories with poor genetic construct validity for
+    a given analysis (see phecodex_mapper/data/recommended_exclusions.csv), or
+    specific phecodes. Distinct from --control-exclusions, which only adjusts
+    the control pool for *other* phecodes.
+    """
+    con.execute("CREATE TABLE excluded_phecodes(phecode VARCHAR)")
+    if not exclude_phenotypes:
+        return 0
+    ex_src = relation_for(exclude_phenotypes)
+    cols = _columns(con, ex_src)
+    required = {"match_type", "match_value"}
+    if required - cols:
+        raise ValueError(f"--exclude-phenotypes missing columns: {sorted(required - cols)}")
+    con.execute(f"CREATE VIEW exclude_phenotypes_input AS SELECT * FROM {ex_src}")
+    bad_types = con.execute(
+        "SELECT DISTINCT match_type FROM exclude_phenotypes_input WHERE match_type NOT IN ('category', 'phecode')"
+    ).fetchall()
+    if bad_types:
+        raise ValueError(f"--exclude-phenotypes match_type must be 'category' or 'phecode', got: {[r[0] for r in bad_types]}")
+    has_category_rule = con.execute(
+        "SELECT count(*) FROM exclude_phenotypes_input WHERE match_type = 'category'"
+    ).fetchone()[0] > 0
+    info_path = release / "phecode_info.parquet"
+    info_view = None
+    if has_category_rule:
+        if not info_path.exists():
+            raise ValueError("--exclude-phenotypes has a 'category' rule, but this release has no phecode_info.parquet "
+                              "(build-vocabulary was run without --phecodex-info). Rebuild the release with a "
+                              "--phecodex-info file that has a 'category' column, or use 'phecode'-type rules instead.")
+        info_view = f"read_parquet('{quote(info_path)}')"
+        if "category" not in _columns(con, info_view):
+            raise ValueError("--exclude-phenotypes has a 'category' rule, but this release's phecode_info has no "
+                              "'category' column.")
+    con.execute(f"""
+      INSERT INTO excluded_phecodes
+      SELECT DISTINCT match_value FROM exclude_phenotypes_input WHERE match_type = 'phecode'
+    """ + (f"""
+      UNION
+      SELECT DISTINCT pi.phecode FROM exclude_phenotypes_input x JOIN {info_view} pi
+        ON x.match_type = 'category' AND x.match_value = pi.category
+    """ if info_view else ""))
+    return con.execute("SELECT count(*) FROM excluded_phecodes").fetchone()[0]
+
+
+def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_rule: str = "any-event", exclusions: Path | None = None, min_cases: int = 200, min_controls: int = 200, max_unmapped_rate: float = 1.0, exclude_phenotypes: Path | None = None) -> None:
     if case_rule not in {"any-event", "two-dates"}:
         raise ValueError("case_rule must be any-event or two-dates")
     if output.exists():
@@ -65,11 +112,13 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
       CREATE TABLE unmapped_events AS SELECT e.* FROM normalized_events e
       WHERE normalized_code IS NULL OR NOT EXISTS (SELECT 1 FROM mapped_events m WHERE m.event_id=e.event_id)
     """)
+    excluded_phecode_count = _load_excluded_phecodes(con, release, exclude_phenotypes)
+    not_excluded = "phecode NOT IN (SELECT phecode FROM excluded_phecodes)"
     if case_rule == "any-event":
-        con.execute("CREATE TABLE cases AS SELECT DISTINCT person_id, phecode FROM mapped_events")
+        con.execute(f"CREATE TABLE cases AS SELECT DISTINCT person_id, phecode FROM mapped_events WHERE {not_excluded}")
     else:
-        con.execute("CREATE TABLE cases AS SELECT person_id, phecode FROM mapped_events WHERE event_date IS NOT NULL GROUP BY person_id,phecode HAVING count(DISTINCT event_date) >= 2")
-    con.execute("CREATE TABLE all_phecodes AS SELECT DISTINCT phecode FROM mapped_events")
+        con.execute(f"CREATE TABLE cases AS SELECT person_id, phecode FROM mapped_events WHERE event_date IS NOT NULL AND {not_excluded} GROUP BY person_id,phecode HAVING count(DISTINCT event_date) >= 2")
+    con.execute(f"CREATE TABLE all_phecodes AS SELECT DISTINCT phecode FROM mapped_events WHERE {not_excluded}")
     con.execute("CREATE TABLE exclusions(person_id VARCHAR, phecode VARCHAR)")
     exclusion_version = None
     if exclusions:
@@ -127,6 +176,7 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     rate = unmapped / total if total else 0
     audit = {"created_at_utc": dt.datetime.now(dt.UTC).isoformat(), "release": str(release), "case_rule": case_rule,
              "min_cases": min_cases, "min_controls": min_controls, "exclusion_version": exclusion_version,
+             "exclude_phenotypes": None if not exclude_phenotypes else {"file": str(exclude_phenotypes), "phecodes_excluded": excluded_phecode_count},
              "events": total, "unmapped_events": unmapped, "unmapped_rate": rate,
              "release_manifest_sha256": checksum(release / "manifest.json"),
              "phenotype_matrix": matrix_info}

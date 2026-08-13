@@ -25,3 +25,6 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+phecodex_mapper = ["data/*.csv"]
