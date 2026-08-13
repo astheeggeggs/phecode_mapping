@@ -206,18 +206,20 @@ thousands of output rows.
 | `match_value` | yes | the category name or phecode to match |
 
 `phecodex_mapper/data/recommended_exclusions.csv` (bundled with this
-package) is a **starting point, not a complete answer** — for a rare-variant
-association analysis, it drops `Symptoms` (non-specific sign/symptom codes)
-and `Neonatal` (case status mostly reflects gestational age/obstetrics, not
-the child's own germline burden) wholesale, plus three purely administrative
-pregnancy-encounter phecodes (`PP_P001`–`PP_P003`). It deliberately does
-**not** attempt to hand-pick which `Infections` or clinical `Pregnancy`
-phecodes to drop — those need case-by-case clinical judgment (e.g. acute/
-environmentally-driven infections have little heritable signal, but
-monogenic-susceptibility infection phenotypes and genuinely heritable
-pregnancy complications like pre-eclampsia do) that shouldn't be baked into
-a shared default without review. Copy it and extend it for your own study
-rather than passing it through unmodified.
+package) is a starting point tuned for rare-variant association analysis. It
+drops three whole categories: `Symptoms` (non-specific sign/symptom codes),
+`Neonatal` (case status mostly reflects gestational age/obstetrics, not the
+child's own germline burden), and `Infections` (dominated by exposure and
+healthcare-seeking behaviour rather than heritable susceptibility for the
+large majority of these phecodes — excluded wholesale rather than
+case-by-case, since keeping specific monogenic-susceptibility/severe-
+infection phenotypes would need clinical review this default deliberately
+doesn't attempt), plus three purely administrative pregnancy-encounter
+phecodes (`PP_P001`–`PP_P003`). It still leaves clinical `Pregnancy`
+complications (e.g. pre-eclampsia, gestational diabetes) untouched, since
+those have real heritable signal. Review it before relying on it for your
+own study — it reflects one reasonable set of calls, not an authoritative
+standard.
 
 `audit.json`'s `exclude_phenotypes.phecodes_excluded` records how many
 phecodes this removed, so a run's phenotype list can always be traced back
