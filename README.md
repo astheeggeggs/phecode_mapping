@@ -167,7 +167,10 @@ One row per person to include in the run.
 
 | column | required | notes |
 |---|---|---|
-| `person_id` | yes | must be non-null and unique; any other columns are ignored |
+| `person_id` | yes | must be non-null and unique |
+| `sex` | no | `"Male"` or `"Female"` (case-insensitive). Used only to NA out sex-restricted phecodes in `phenotype_matrix` (see [Outputs](#outputs)); everything else in the pipeline ignores it. Omit it and sex-restricted phecodes simply aren't NA'd (see the warning this produces, below) |
+
+Any other columns are ignored.
 
 ### `--events` (required, `map-phecodes`)
 
@@ -224,10 +227,60 @@ takes precedence over an exclusion.
 `map-phecodes --output <run>/`:
 
 - `phecode_counts.parquet` / `.csv` — one row per phecode: `case_count`, `control_count_before_exclusions`, `excluded_control_count`, `control_count_after_exclusions`, `retained`
-- `person_phecodes.parquet` — one row per `(person_id, phecode)` case
+- `person_phecodes.parquet` — one row per `(person_id, phecode)` case (long format)
 - `eligible_phecodes.xlsx` — `phecode_counts` rows filtered to `retained=true`, for hand-off to analysts
+- `phenotype_matrix.parquet` / `.csv.gz` — wide person × phecode matrix, gzip-compressed CSV / zstd-compressed Parquet (see below)
 - `unmapped_events.csv` — events that didn't match the vocabulary map, for QC
-- `audit.json` — timestamp, case rule, thresholds, exclusion version, unmapped rate, and the release's manifest checksum, so a run can always be traced back to the exact release and inputs that produced it
+- `audit.json` — timestamp, case rule, thresholds, exclusion version, unmapped rate, phenotype-matrix summary, and the release's manifest checksum, so a run can always be traced back to the exact release and inputs that produced it
+
+### `phenotype_matrix`
+
+One row per person in `--cohort`, one column per **retained** phecode (i.e.
+the same set as `eligible_phecodes.xlsx`: `case_count >= --min-cases` *and*
+`control_count_after_exclusions >= --min-controls`), for hand-off to
+downstream analysis tools (e.g. SAIGE, PLINK, regression) that expect a
+dense phenotype table rather than the long-format `person_phecodes.parquet`.
+Each cell is one of:
+
+- `1` — the person is a case for that phecode
+- `0` — the person is an ordinary control for that phecode
+- *(blank/NA)* — the person isn't evaluable as either for that phecode,
+  because either:
+  - the phecode is sex-restricted (per `--phecodex-info`'s `sex` column at
+    build time) and this person's `--cohort` `sex` doesn't match (or is
+    missing/unspecified), **or**
+  - `--control-exclusions` removes this person from that phecode's control
+    pool and they aren't already a case (cases are never excluded)
+
+If any retained phecode is sex-restricted but `--cohort` has no `sex`
+column, `map-phecodes` prints a warning and leaves that phecode's column
+un-NA'd for everyone (opposite-sex people get `0` instead of blank) —
+`audit.json`'s `phenotype_matrix.sex_restricted_phecodes_treated_as_unrestricted`
+records how many columns this affected, so this can't silently pass
+unnoticed. Add a `sex` column to `--cohort` to fix it. Note that the
+official PhecodeX 1.1 `phecodeX_info.csv` does not itself include a `sex`
+column — sex-restriction is only applied if your `--phecodex-info` source
+provides one (e.g. a hand-curated addition for phecodes like
+pregnancy/prostate-specific ones); without it, no phecode is treated as
+sex-restricted and this feature is a no-op.
+
+Because this is a dense matrix, its size scales with cohort size × number
+of retained phecodes. Verified end-to-end against the real UK Biobank-scale
+fixture used elsewhere in this README (336,304 people): building the
+default-threshold matrix (1,112 retained phecodes at `--min-cases 200
+--min-controls 200`) took under a minute and produced a 7.2MB
+zstd-compressed Parquet file / 8.5MB gzip-compressed CSV; per-column sums
+were spot-checked against `phecode_counts.parquet`'s `case_count` and
+matched exactly. The initial implementation used a single dense
+`cohort CROSS JOIN retained_phecodes` plus DuckDB's `PIVOT`, which was
+**not** viable at this scale (unbounded — DuckDB's `PIVOT` re-scans its
+source once per pivot column, and the cross join itself is the same
+hundreds-of-millions-of-rows shape this tool's `phecode_counts` computation
+also deliberately avoids); the shipped version instead builds a sparse
+per-(person, phecode) table sized
+to cases + exclusions, batches column construction (200 phecodes per
+batch) to bound peak memory/temp-disk regardless of cohort size, and
+stitches the batches back together with cheap `USING (person_id)` joins.
 
 ## Multi-biobank rollout checklist
 

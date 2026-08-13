@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import sys
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -27,7 +28,9 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
         raise FileExistsError(f"Output directory already exists: {output}. Remove it or choose a new --output path.")
     output.mkdir(parents=True)
     con = connect(); cohort_src = relation_for(cohort); event_src = relation_for(events)
-    if "person_id" not in _columns(con, cohort_src): raise ValueError("Cohort requires person_id")
+    cohort_columns = _columns(con, cohort_src)
+    if "person_id" not in cohort_columns: raise ValueError("Cohort requires person_id")
+    has_sex = "sex" in cohort_columns
     required = {"person_id", "code", "vocabulary"}
     missing = required - _columns(con, event_src)
     if missing: raise ValueError(f"Events missing columns: {sorted(missing)}")
@@ -36,7 +39,8 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     invalid = con.execute("SELECT count(*) FROM cohort_input WHERE person_id IS NULL").fetchone()[0]
     duplicate = con.execute("SELECT count(*) - count(DISTINCT person_id) FROM cohort_input").fetchone()[0]
     if invalid or duplicate: raise ValueError("Cohort person_id must be non-null and unique")
-    con.execute("CREATE TABLE cohort AS SELECT person_id FROM cohort_input")
+    sex_expression = "upper(trim(sex))" if has_sex else "CAST(NULL AS VARCHAR)"
+    con.execute(f"CREATE TABLE cohort AS SELECT person_id, {sex_expression} AS sex FROM cohort_input")
     con.execute(f"CREATE VIEW events_input AS SELECT * FROM {event_src}")
     date_expression = "try_cast(e.event_date AS DATE)" if "event_date" in _columns(con, event_src) else "CAST(NULL AS DATE)"
     con.execute(f"""
@@ -116,11 +120,129 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     rows = con.execute("SELECT * FROM phecode_counts WHERE retained ORDER BY phecode").fetchall()
     headers = [r[0] for r in con.execute("DESCRIBE phecode_counts").fetchall()]
     _xlsx(output / "eligible_phecodes.xlsx", headers, rows)
+
+    matrix_info = _write_phenotype_matrix(con, release, output, has_sex)
+
     total = con.execute("SELECT count(*) FROM normalized_events").fetchone()[0]; unmapped = con.execute("SELECT count(*) FROM unmapped_events").fetchone()[0]
     rate = unmapped / total if total else 0
     audit = {"created_at_utc": dt.datetime.now(dt.UTC).isoformat(), "release": str(release), "case_rule": case_rule,
              "min_cases": min_cases, "min_controls": min_controls, "exclusion_version": exclusion_version,
              "events": total, "unmapped_events": unmapped, "unmapped_rate": rate,
-             "release_manifest_sha256": checksum(release / "manifest.json")}
+             "release_manifest_sha256": checksum(release / "manifest.json"),
+             "phenotype_matrix": matrix_info}
     (output / "audit.json").write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n")
     if rate > max_unmapped_rate: raise RuntimeError(f"Unmapped rate {rate:.3%} exceeds threshold {max_unmapped_rate:.3%}")
+
+
+def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> dict:
+    """Write a wide person x phecode matrix: 1 = case, 0 = control, NA = not
+    evaluable (sex-restricted phecode and person's sex doesn't match / is
+    unknown, or the person is covered by a control exclusion for that
+    phecode without being a case). Columns are restricted to retained
+    phecodes (case_count >= --min-cases and control_count_after_exclusions
+    >= --min-controls), matching eligible_phecodes.xlsx.
+    """
+    phecode_sex: dict[str, str] = {}
+    info_path = release / "phecode_info.parquet"
+    if info_path.exists():
+        info_view = f"read_parquet('{quote(info_path)}')"
+        info_columns = _columns(con, info_view)
+        if {"phecode", "sex"} <= info_columns:
+            for phecode, sex in con.execute(f"SELECT phecode, upper(trim(sex)) FROM {info_view}").fetchall():
+                if sex in ("MALE", "FEMALE"):
+                    phecode_sex[phecode] = sex
+
+    retained_phecodes = [r[0] for r in con.execute("SELECT phecode FROM phecode_counts WHERE retained ORDER BY phecode").fetchall()]
+    sex_restricted_retained = [p for p in retained_phecodes if p in phecode_sex]
+    if sex_restricted_retained and not has_sex:
+        # Not fatal: without a cohort sex column we cannot tell an ineligible
+        # opposite-sex person apart from a genuine control, so those cells
+        # are left as ordinary controls (0) rather than NA. Flag this loudly
+        # in the audit trail rather than silently producing a matrix that
+        # looks complete but is wrong for these columns.
+        print(f"phecodex-map: warning: {len(sex_restricted_retained)} retained phecode(s) are sex-restricted "
+              "but --cohort has no 'sex' column -- those columns will contain 0 for opposite-sex people "
+              "instead of NA. Add a 'sex' column (values 'Male'/'Female') to --cohort to fix this.",
+              file=sys.stderr)
+
+    if not retained_phecodes:
+        con.execute("CREATE TABLE phenotype_matrix AS SELECT person_id FROM cohort ORDER BY person_id")
+    else:
+        # Deliberately avoids `cohort CROSS JOIN retained_phecodes` (and DuckDB's PIVOT over
+        # a large IN-list, which internally rescans its source once per pivot value): at
+        # real-world scale (hundreds of thousands of people x thousands of retained
+        # phecodes) that's the same hundreds-of-millions-of-rows blowup as the
+        # phecode_counts cross join fixed above, and re-scanning per column made it worse,
+        # not better (observed: single-digit minutes *per column* against a 336k-person
+        # fixture, i.e. effectively unbounded). Instead, build a *sparse* per-(person,
+        # phecode) table sized to cases+exclusions (not cohort_size x phecode_count), then
+        # pivot that with one MAX(CASE WHEN phecode=... THEN val END) expression per column
+        # -- a single GROUP BY pass over the sparse table, however many columns there are.
+        # 1 = case, -1 = excluded-from-controls; MAX(1, -1) = 1 so a case always wins over
+        # an exclusion for the same person+phecode, matching "a case is never excluded".
+        con.execute("CREATE TABLE retained_phecodes(phecode VARCHAR, restrict_sex VARCHAR)")
+        con.executemany("INSERT INTO retained_phecodes VALUES (?, ?)",
+                         [(p, phecode_sex.get(p)) for p in retained_phecodes])
+        con.execute("""
+          CREATE TABLE sparse_values AS
+          SELECT ca.person_id, ca.phecode, 1 AS value FROM cases ca JOIN retained_phecodes rp ON rp.phecode = ca.phecode
+          UNION ALL
+          SELECT ex.person_id, ex.phecode, -1 AS value FROM exclusions ex JOIN retained_phecodes rp ON rp.phecode = ex.phecode
+        """)
+
+        def sql_literal(value: str | None) -> str:
+            return "NULL" if value is None else "'" + value.replace("'", "''") + "'"
+
+        def quote_ident(name: str) -> str:
+            return '"' + name.replace('"', '""') + '"'
+
+        # Batch columns rather than building one query with a column per retained
+        # phecode: a single aggregate/CASE expression list spanning thousands of
+        # columns measurably increases DuckDB's temp-spill footprint (observed:
+        # ~850MB of spill for ~2,600 columns against a 336k-person cohort). Batching
+        # keeps each step's working set bounded by batch_size regardless of how many
+        # phecodes are retained; the batches are then stitched back together with
+        # cheap USING(person_id) joins.
+        batch_size = 200
+        batch_tables = []
+        for batch_start in range(0, len(retained_phecodes), batch_size):
+            batch = retained_phecodes[batch_start:batch_start + batch_size]
+            batch_in_list = ", ".join(sql_literal(p) for p in batch)
+            agg_columns = ", ".join(
+                f"max(CASE WHEN phecode = {sql_literal(p)} THEN value END) AS {quote_ident(p)}" for p in batch
+            )
+            con.execute(f"""
+              CREATE TEMP TABLE batch_agg AS
+              SELECT person_id, {agg_columns} FROM sparse_values WHERE phecode IN ({batch_in_list}) GROUP BY person_id
+            """)
+            final_columns = ", ".join(
+                f"""CASE WHEN {sql_literal(phecode_sex.get(p))} IS NOT NULL AND (c.sex IS NULL OR c.sex <> {sql_literal(phecode_sex.get(p))}) THEN NULL """
+                f"""WHEN pa.{quote_ident(p)} = 1 THEN 1 """
+                f"""WHEN pa.{quote_ident(p)} = -1 THEN NULL """
+                f"""ELSE 0 END AS {quote_ident(p)}"""
+                for p in batch
+            )
+            table_name = f"matrix_batch_{batch_start}"
+            con.execute(f"""
+              CREATE TABLE {table_name} AS
+              SELECT c.person_id, {final_columns} FROM cohort c LEFT JOIN batch_agg pa ON pa.person_id = c.person_id
+            """)
+            con.execute("DROP TABLE batch_agg")
+            batch_tables.append(table_name)
+
+        join_clause = " JOIN ".join(batch_tables) if len(batch_tables) == 1 else \
+            batch_tables[0] + "".join(f" JOIN {t} USING (person_id)" for t in batch_tables[1:])
+        con.execute(f"CREATE TABLE phenotype_matrix AS SELECT * FROM {join_clause} ORDER BY person_id")
+        for table_name in batch_tables:
+            con.execute(f"DROP TABLE {table_name}")
+    # Compressed: this is a dense matrix (cohort_size x retained_phecode_count), which at
+    # real biobank scale is large -- gzip the CSV, and use zstd (better ratio than the
+    # Parquet default) for the Parquet copy.
+    con.execute(f"COPY phenotype_matrix TO '{quote(output / 'phenotype_matrix.parquet')}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+    con.execute(f"COPY phenotype_matrix TO '{quote(output / 'phenotype_matrix.csv.gz')}' (HEADER, DELIMITER ',', COMPRESSION 'gzip')")
+    return {
+        "n_columns": len(retained_phecodes),
+        "cohort_has_sex_column": has_sex,
+        "sex_restricted_retained_phecodes": len(sex_restricted_retained),
+        "sex_restricted_phecodes_treated_as_unrestricted": 0 if has_sex else len(sex_restricted_retained),
+    }

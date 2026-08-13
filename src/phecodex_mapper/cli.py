@@ -44,7 +44,8 @@ def main() -> None:
                       help="Release directory produced by build-vocabulary.")
     run.add_argument("--cohort", required=True, type=Path,
                       help="CSV/Parquet with one row per person (requires column: person_id, "
-                           "non-null and unique).")
+                           "non-null and unique; optional column: sex, values 'Male'/'Female', "
+                           "used to NA out sex-restricted phecodes in phenotype_matrix).")
     run.add_argument("--events", required=True, type=Path,
                       help="CSV/Parquet with one row per clinical event (requires columns: "
                            "person_id, code, vocabulary; event_date required for --case-rule "
