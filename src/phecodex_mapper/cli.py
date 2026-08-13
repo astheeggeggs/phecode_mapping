@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from .mapper import map_phecodes
+from .vocabulary import build_vocabulary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="phecodex-map",
+        description="Build reproducible PhecodeX mapping releases and map cohort events to phecodes.",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    build = commands.add_parser(
+        "build-vocabulary",
+        help="Turn an official PhecodeX map into a versioned, checksummed release directory.",
+        description="Turn an official PhecodeX map (and, optionally, an Athena vocabulary "
+                     "extract) into a versioned, checksummed release directory for map-phecodes.",
+    )
+    build.add_argument("--phecodex-map", required=True, type=Path,
+                        help="Official PhecodeX unrolled ICD map CSV/Parquet "
+                             "(requires columns: phecode, ICD, vocabulary_id).")
+    build.add_argument("--phecodex-info", type=Path,
+                        help="Optional phecode metadata CSV/Parquet (phecode, sex, "
+                             "phecode_string, category). Omit to default sex=Both and blank text.")
+    build.add_argument("--athena-dir", type=Path,
+                        help="Optional directory with an authorized Athena/OMOP vocabulary "
+                             "extract (CONCEPT.csv, CONCEPT_RELATIONSHIP.csv) used to bridge "
+                             "SNOMED codes to the ICD map. Never commit Athena data or credentials.")
+    build.add_argument("--output", required=True, type=Path,
+                        help="Release directory to create. Must not already exist.")
+
+    run = commands.add_parser(
+        "map-phecodes",
+        help="Map one cohort's events against a release and write per-phecode case/control counts.",
+        description="Map one cohort's ICD/SNOMED events against a release built by "
+                     "build-vocabulary and write per-phecode case/control counts.",
+    )
+    run.add_argument("--release", required=True, type=Path,
+                      help="Release directory produced by build-vocabulary.")
+    run.add_argument("--cohort", required=True, type=Path,
+                      help="CSV/Parquet with one row per person (requires column: person_id, "
+                           "non-null and unique).")
+    run.add_argument("--events", required=True, type=Path,
+                      help="CSV/Parquet with one row per clinical event (requires columns: "
+                           "person_id, code, vocabulary; event_date required for --case-rule "
+                           "two-dates).")
+    run.add_argument("--output", required=True, type=Path,
+                      help="Run directory to create. Must not already exist.")
+    run.add_argument("--case-rule", choices=["any-event", "two-dates"], default="any-event",
+                      help="any-event: one mapped event makes a case (default). two-dates: "
+                           "requires mapped events on >=2 distinct dates for the same phecode.")
+    run.add_argument("--control-exclusions", type=Path,
+                      help="Optional CSV/Parquet (phecode, exclusion_type, exclusion_value, "
+                           "[version]) removing people from a phecode's control pool. Cases are "
+                           "never excluded.")
+    run.add_argument("--min-cases", type=int, default=200,
+                      help="Minimum case count for a phecode to be marked retained (default: 200).")
+    run.add_argument("--min-controls", type=int, default=200,
+                      help="Minimum control count (after exclusions) for a phecode to be marked "
+                           "retained (default: 200).")
+    run.add_argument("--max-unmapped-rate", type=float, default=1.0,
+                      help="Raise an error if the fraction of events that fail to map exceeds "
+                           "this (default: 1.0, i.e. never fail).")
+    args = parser.parse_args()
+    try:
+        if args.command == "build-vocabulary":
+            build_vocabulary(args.phecodex_map, args.phecodex_info, args.output, args.athena_dir)
+        else:
+            map_phecodes(args.release, args.cohort, args.events, args.output, args.case_rule, args.control_exclusions, args.min_cases, args.min_controls, args.max_unmapped_rate)
+    except (ValueError, FileExistsError, FileNotFoundError, RuntimeError) as exc:
+        # Known, user-actionable failures (bad input, existing output dir, unmapped-rate
+        # threshold, ...) are reported as a single line; anything else surfaces as a full
+        # traceback so unexpected bugs stay debuggable.
+        print(f"phecodex-map: error: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+if __name__ == "__main__": main()

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phecodex-mapper"
+version = "0.1.0"
+description = "Reproducible PhecodeX mapping and cohort retention tooling"
+requires-python = ">=3.11"
+dependencies = [
+  "duckdb>=1.1",
+  "pyarrow>=15",
+  "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+phetk = ["phetk==0.3.3"]
+
+[project.scripts]
+phecodex-map = "phecodex_mapper.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.DS_Store
+.claude/
+
+# Licensed vocabulary data and any real/de-identified patient-level fixtures --
+# must never be committed (see README's "Data governance" section).
+athena/
+scratchpad_ukb/
+*deid*.csv
