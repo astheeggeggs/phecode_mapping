@@ -34,39 +34,45 @@
 #   dt_icd <- extract_ID_and_ICD_UKB(phenotype_file = "...")  # from POI_rg_munging
 #   deidentify_ukb_icd_for_testing(
 #     dt_icd,
-#     events_out = "events_deid.csv",
-#     cohort_out = "cohort_deid.csv"
+#     events_out = "events_deid.csv.gz",
+#     cohort_out = "cohort_deid.csv.gz",
+#     female_code = "0", male_code = "1"
 #   )
 #
-# The resulting events_deid.csv / cohort_deid.csv can be passed straight to:
+# The resulting events_deid.csv.gz / cohort_deid.csv.gz can be passed straight to:
 #   phecodex-map map-phecodes --release <release> \
-#     --cohort cohort_deid.csv --events events_deid.csv --output <run>
+#     --cohort cohort_deid.csv.gz --events events_deid.csv.gz --output <run>
 #
 # Command-line usage (reads the raw UKB extract itself, compressed or not --
 # data.table::fread shells out to zcat/gunzip transparently for .gz/.bgz):
 #
 #   Rscript scripts/deidentify_ukb_for_testing.R \
 #     --input /path/to/ukb_phenotype_file.tab.gz \
-#     --events-out events_deid.csv \
-#     --cohort-out cohort_deid.csv \
-#     --seed 1
+#     --events-out events_deid.csv.gz \
+#     --cohort-out cohort_deid.csv.gz \
+#     --seed 1 \
+#     --female-code 0 \
+#     --male-code 1
 #
 # --input is read with extract_ID_and_ICD_UKB() (defined below), which
 # understands both UKB column-naming conventions ("41202-2.0" and
-# "f.41202.0.0"/"f.eid"). If you already have a data.table in the eid /
+# "f.41202.0.0"/"f.eid") and extracts sex field 22001. The command-line
+# sex encodings must be supplied explicitly with --female-code and --male-code.
+# If you already have a data.table in the eid /
 # ICD9_string / ICD10_string shape, source() this file instead and call
 # deidentify_ukb_icd_for_testing() directly -- see the Usage block above.
 
 library(data.table)
 
 # Reads a raw UKB phenotype extract and returns a data.table with columns
-# eid, ICD9_string, ICD10_string (one row per person, codes space-separated).
+# eid, sex_code, ICD9_string, ICD10_string (one row per person, codes space-separated).
 # Handles both UKB column-naming conventions seen in the wild:
 #   - "<field>-<instance>.<array>", e.g. "41202-2.0"
 #   - "f.<field>.<instance>.<array>", e.g. "f.41202.0.0", with the ID column
 #     named "f.eid" instead of "eid".
 extract_ID_and_ICD_UKB <- function(
-	phenotype_file = "/well/lindgren-ukbb/projects/ukbb-11867/DATA/PHENOTYPE/PHENOTYPE_MAIN/ukb10844_ukb50009_updateddiagnoses_14012022.csv"
+	phenotype_file = "/well/lindgren-ukbb/projects/ukbb-11867/DATA/PHENOTYPE/PHENOTYPE_MAIN/ukb10844_ukb50009_updateddiagnoses_14012022.csv",
+	sex_field = "22001"
 )
 {
 	get_cols <- function(codes, dt) {
@@ -84,13 +90,19 @@ extract_ID_and_ICD_UKB <- function(
 	ICD10s <- c("41202", "41204", "40006", "40001", "40002")
 	ICD9s <- c("41203", "41205", "40013")
 
-	cols <- get_cols(c(ICD9s, ICD10s), dt_header)
+	sex_cols <- get_cols(sex_field, dt_header)
+	if (!length(sex_cols)) stop(sprintf("Could not find UKB sex field %s", sex_field))
+	cols <- c(sex_cols, get_cols(c(ICD9s, ICD10s), dt_header))
 	select_cols <- rep("character", (length(cols) + 1))
 	names(select_cols) <- c(id_col, cols)
 
 	# Read in the entire file ensuring these columns are encoded as characters to avoid NA weirdness.
 	dt <- fread(phenotype_file, na.strings=NULL, select=select_cols)
 	if (id_col != "eid") setnames(dt, id_col, "eid")
+	dt[, sex_code := apply(.SD, 1, function(x) {
+		x <- x[!is.na(x) & nzchar(trimws(x))]
+		if (length(x)) trimws(x[1]) else ""
+	}), .SDcols=sex_cols]
 
 	ICD10_cols <- get_cols(ICD10s, dt)
 	dt[, ICD10_string := do.call(paste, .SD), .SDcols=ICD10_cols]
@@ -109,20 +121,26 @@ extract_ID_and_ICD_UKB <- function(
 	if (length(which(is.na(dt$ICD10_string))) > 0) dt$ICD10_string[which(is.na(dt$ICD10_string))] <- ""
 	if (length(which(is.na(dt$ICD9_string))) > 0) dt$ICD9_string[which(is.na(dt$ICD9_string))] <- ""
 
-	dt <- dt[, c("eid", "ICD9_string", "ICD10_string"), with=FALSE]
+	dt <- dt[, c("eid", "sex_code", "ICD9_string", "ICD10_string"), with=FALSE]
 	return(dt)
 }
 
 deidentify_ukb_icd_for_testing <- function(
 	dt_icd,
-	events_out = "events_deid.csv",
-	cohort_out = "cohort_deid.csv",
+	events_out = "events_deid.csv.gz",
+	cohort_out = "cohort_deid.csv.gz",
 	date_min = "2000-01-01",
 	date_max = "2022-12-31",
 	seed = NULL,
-	max_people = NULL
+	max_people = NULL,
+	female_code = NULL,
+	male_code = NULL
 ) {
-	stopifnot(all(c("eid", "ICD9_string", "ICD10_string") %in% names(dt_icd)))
+	stopifnot(all(c("eid", "sex_code", "ICD9_string", "ICD10_string") %in% names(dt_icd)))
+	if (is.null(female_code) || is.null(male_code)) stop("female_code and male_code must be supplied explicitly")
+	if (!grepl("\\.gz$", events_out, ignore.case=TRUE) || !grepl("\\.gz$", cohort_out, ignore.case=TRUE)) {
+		stop("events_out and cohort_out must be gzip-compressed paths ending in .gz")
+	}
 	dt_icd <- data.table(dt_icd)
 	if (!is.null(seed)) set.seed(seed)
 
@@ -134,6 +152,11 @@ deidentify_ukb_icd_for_testing <- function(
 		dt_icd <- dt_icd[sample(.N, max_people)]
 		n_people <- max_people
 	}
+	sex_values <- trimws(as.character(dt_icd$sex_code))
+	sex_values[is.na(sex_values)] <- ""
+	bad_sex <- unique(sex_values[nzchar(sex_values) & sex_values != as.character(female_code) & sex_values != as.character(male_code)])
+	if (length(bad_sex)) stop(sprintf("Unexpected sex code(s): %s", paste(bad_sex, collapse=", ")))
+	dt_icd[, sex_normalized := fifelse(sex_values == as.character(female_code), "Female", fifelse(sex_values == as.character(male_code), "Male", NA_character_))]
 
 	# 1) explode each person's code strings into one row per (row_index, code, vocabulary).
 	# row_index is a purely positional handle for the block shuffle below -- it is
@@ -196,7 +219,9 @@ deidentify_ukb_icd_for_testing <- function(
 	events <- long[, .(person_id, code, vocabulary, event_date)]
 	fwrite(events, events_out)
 
-	cohort <- data.table(person_id = codes_per_person$person_id)
+	cohort <- data.table(
+		person_id = codes_per_person$person_id,
+		sex = dt_icd$sex_normalized[match(codes_per_person$row_index, dt_icd$row_index)])
 	fwrite(cohort, cohort_out)
 
 	cat(sprintf(
@@ -219,17 +244,21 @@ if (.is_rscript_main) {
 	}
 	.input <- .get_flag("--input")
 	if (!is.null(.input)) {
-		.events_out <- .get_flag("--events-out", "events_deid.csv")
-		.cohort_out <- .get_flag("--cohort-out", "cohort_deid.csv")
-		.seed <- .get_flag("--seed", NULL)
-		.max_people <- .get_flag("--max-people", NULL)
+		.events_out <- .get_flag("--events-out", "events_deid.csv.gz")
+		.cohort_out <- .get_flag("--cohort-out", "cohort_deid.csv.gz")
+			.seed <- .get_flag("--seed", NULL)
+			.max_people <- .get_flag("--max-people", NULL)
+			.female_code <- .get_flag("--female-code")
+			.male_code <- .get_flag("--male-code")
+			if (is.null(.female_code) || is.null(.male_code)) stop("--female-code and --male-code are required")
 		cat(sprintf("Reading %s ...\n", .input))
-		dt_icd <- extract_ID_and_ICD_UKB(phenotype_file = .input)
+			dt_icd <- extract_ID_and_ICD_UKB(phenotype_file = .input, sex_field = "22001")
 		deidentify_ukb_icd_for_testing(
 			dt_icd,
 			events_out = .events_out,
 			cohort_out = .cohort_out,
-			seed = if (!is.null(.seed)) as.integer(.seed) else NULL,
-			max_people = if (!is.null(.max_people)) as.integer(.max_people) else NULL)
+				seed = if (!is.null(.seed)) as.integer(.seed) else NULL,
+				max_people = if (!is.null(.max_people)) as.integer(.max_people) else NULL,
+				female_code = .female_code, male_code = .male_code)
 	}
 }
