@@ -153,7 +153,7 @@ deidentify_ukb_icd_for_testing <- function(
 		n_people <- max_people
 	}
 	sex_values <- trimws(as.character(dt_icd$sex_code))
-	sex_values[is.na(sex_values)] <- ""
+	sex_values[is.na(dt_icd$sex_code) | !nzchar(sex_values) | toupper(sex_values) == "NA"] <- ""
 	bad_sex <- unique(sex_values[nzchar(sex_values) & sex_values != as.character(female_code) & sex_values != as.character(male_code)])
 	if (length(bad_sex)) stop(sprintf("Unexpected sex code(s): %s", paste(bad_sex, collapse=", ")))
 	dt_icd[, sex_normalized := fifelse(sex_values == as.character(female_code), "Female", fifelse(sex_values == as.character(male_code), "Male", NA_character_))]
