@@ -72,7 +72,7 @@ library(data.table)
 #     named "f.eid" instead of "eid".
 extract_ID_and_ICD_UKB <- function(
 	phenotype_file = "/well/lindgren-ukbb/projects/ukbb-11867/DATA/PHENOTYPE/PHENOTYPE_MAIN/ukb10844_ukb50009_updateddiagnoses_14012022.csv",
-	sex_field = "22001"
+	sex_column = "f.22001.0.0"
 )
 {
 	get_cols <- function(codes, dt) {
@@ -90,8 +90,10 @@ extract_ID_and_ICD_UKB <- function(
 	ICD10s <- c("41202", "41204", "40006", "40001", "40002")
 	ICD9s <- c("41203", "41205", "40013")
 
-	sex_cols <- get_cols(sex_field, dt_header)
-	if (!length(sex_cols)) stop(sprintf("Could not find UKB sex field %s", sex_field))
+	if (!(sex_column %in% names(dt_header))) {
+		stop(sprintf("Could not find required UKB sex column %s", sex_column))
+	}
+	sex_cols <- sex_column
 	cols <- c(sex_cols, get_cols(c(ICD9s, ICD10s), dt_header))
 	select_cols <- rep("character", (length(cols) + 1))
 	names(select_cols) <- c(id_col, cols)
@@ -251,8 +253,8 @@ if (.is_rscript_main) {
 			.female_code <- .get_flag("--female-code")
 			.male_code <- .get_flag("--male-code")
 			if (is.null(.female_code) || is.null(.male_code)) stop("--female-code and --male-code are required")
-		cat(sprintf("Reading %s ...\n", .input))
-			dt_icd <- extract_ID_and_ICD_UKB(phenotype_file = .input, sex_field = "22001")
+			cat(sprintf("Reading %s ...\n", .input))
+			dt_icd <- extract_ID_and_ICD_UKB(phenotype_file = .input, sex_column = "f.22001.0.0")
 		deidentify_ukb_icd_for_testing(
 			dt_icd,
 			events_out = .events_out,

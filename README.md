@@ -222,7 +222,9 @@ columns rather than one row per event), see
 `scripts/deidentify_ukb_for_testing.R`'s `extract_ID_and_ICD_UKB()` for a
 worked example of reshaping that into this `person_id, code, vocabulary`
 long format (it also de-identifies, if you need a test fixture — see
-[Data governance](#data-governance)).
+[Data governance](#data-governance)). The extractor requires the UK Biobank
+genetically ascertained sex column `f.22001.0.0` (field 22001, instance 0,
+array 0).
 
 ### `--exclude-phenotypes` (optional, `map-phecodes`)
 
