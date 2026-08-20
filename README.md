@@ -224,7 +224,7 @@ worked example of reshaping that into this `person_id, code, vocabulary`
 long format (it also de-identifies, if you need a test fixture — see
 [Data governance](#data-governance)). The extractor requires the UK Biobank
 genetically ascertained sex column `f.22001.0.0` (field 22001, instance 0,
-array 0).
+array 0), or the equivalent older-format column `22001-0.0`.
 
 ### `--exclude-phenotypes` (optional, `map-phecodes`)
 

@@ -67,12 +67,13 @@ library(data.table)
 # Reads a raw UKB phenotype extract and returns a data.table with columns
 # eid, sex_code, ICD9_string, ICD10_string (one row per person, codes space-separated).
 # Handles both UKB column-naming conventions seen in the wild:
-#   - "<field>-<instance>.<array>", e.g. "41202-2.0"
+#   - "<field>-<instance>.<array>", e.g. "41202-2.0" (including sex
+#     as "22001-0.0")
 #   - "f.<field>.<instance>.<array>", e.g. "f.41202.0.0", with the ID column
 #     named "f.eid" instead of "eid".
 extract_ID_and_ICD_UKB <- function(
 	phenotype_file = "/well/lindgren-ukbb/projects/ukbb-11867/DATA/PHENOTYPE/PHENOTYPE_MAIN/ukb10844_ukb50009_updateddiagnoses_14012022.csv",
-	sex_column = "f.22001.0.0"
+	sex_column = NULL
 )
 {
 	get_cols <- function(codes, dt) {
@@ -90,10 +91,13 @@ extract_ID_and_ICD_UKB <- function(
 	ICD10s <- c("41202", "41204", "40006", "40001", "40002")
 	ICD9s <- c("41203", "41205", "40013")
 
-	if (!(sex_column %in% names(dt_header))) {
-		stop(sprintf("Could not find required UKB sex column %s", sex_column))
+	sex_candidates <- if (is.null(sex_column)) c("f.22001.0.0", "22001-0.0") else sex_column
+	sex_cols <- intersect(sex_candidates, names(dt_header))
+	if (!length(sex_cols)) {
+		stop(sprintf("Could not find required UKB sex column; expected one of: %s",
+			paste(sex_candidates, collapse = ", ")))
 	}
-	sex_cols <- sex_column
+	sex_cols <- sex_cols[1]
 	cols <- c(sex_cols, get_cols(c(ICD9s, ICD10s), dt_header))
 	select_cols <- rep("character", (length(cols) + 1))
 	names(select_cols) <- c(id_col, cols)
@@ -254,7 +258,7 @@ if (.is_rscript_main) {
 			.male_code <- .get_flag("--male-code")
 			if (is.null(.female_code) || is.null(.male_code)) stop("--female-code and --male-code are required")
 			cat(sprintf("Reading %s ...\n", .input))
-			dt_icd <- extract_ID_and_ICD_UKB(phenotype_file = .input, sex_column = "f.22001.0.0")
+			dt_icd <- extract_ID_and_ICD_UKB(phenotype_file = .input)
 		deidentify_ukb_icd_for_testing(
 			dt_icd,
 			events_out = .events_out,
