@@ -179,7 +179,7 @@ deidentify_ukb_icd_for_testing <- function(
 		out[, vocabulary := vocabulary]
 		out
 	}
-	long <- rbind(build_long("ICD9_string", "ICD9CM"), build_long("ICD10_string", "ICD10CM"))
+	long <- rbind(build_long("ICD9_string", "ICD9CM"), build_long("ICD10_string", "ICD10"))
 
 	# 2) drop eid entirely; capture how many codes each row (real person) had.
 	# Every original row must be kept here, including people with zero codes --
