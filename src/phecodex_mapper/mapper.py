@@ -77,7 +77,9 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     con = connect(); cohort_src = relation_for(cohort); event_src = relation_for(events)
     cohort_columns = _columns(con, cohort_src)
     if "person_id" not in cohort_columns: raise ValueError("Cohort requires person_id")
-    has_sex = "sex" in cohort_columns
+    if "sex" not in cohort_columns:
+        raise ValueError("Cohort requires sex column")
+    has_sex = True
     required = {"person_id", "code", "vocabulary"}
     missing = required - _columns(con, event_src)
     if missing: raise ValueError(f"Events missing columns: {sorted(missing)}")
@@ -92,10 +94,12 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     date_expression = "try_cast(e.event_date AS DATE)" if "event_date" in _columns(con, event_src) else "CAST(NULL AS DATE)"
     con.execute(f"""
       CREATE TABLE normalized_events AS
-      SELECT row_number() OVER () AS event_id, e.person_id, upper(trim(e.vocabulary)) AS vocabulary, e.code AS source_code,
-        CASE WHEN upper(trim(e.vocabulary)) IN ('ICD9CM','ICD10CM')
-             THEN regexp_replace(upper(trim(e.code)), '[.\\s-]', '', 'g')
-             WHEN upper(trim(e.vocabulary)) = 'SNOMED' THEN regexp_replace(trim(e.code), '\\s+', '', 'g')
+      SELECT row_number() OVER () AS event_id, e.person_id,
+        upper(trim(CAST(e.vocabulary AS VARCHAR))) AS vocabulary,
+        CAST(e.code AS VARCHAR) AS source_code,
+        CASE WHEN upper(trim(CAST(e.vocabulary AS VARCHAR))) IN ('ICD9CM','ICD10CM','ICD10')
+             THEN regexp_replace(upper(trim(CAST(e.code AS VARCHAR))), '[.\\s-]', '', 'g')
+             WHEN upper(trim(CAST(e.vocabulary AS VARCHAR))) = 'SNOMED' THEN regexp_replace(trim(CAST(e.code AS VARCHAR)), '\\s+', '', 'g')
         ELSE NULL END AS normalized_code,
         {date_expression} AS event_date
       FROM events_input e JOIN cohort c USING (person_id)
@@ -123,9 +127,21 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     exclusion_version = None
     if exclusions:
         ex_src = relation_for(exclusions); cols = _columns(con, ex_src)
-        need = {"phecode", "exclusion_type", "exclusion_value"}
+        need = {"phecode", "exclusion_type", "exclusion_value", "vocabulary"}
         if need - cols: raise ValueError(f"Exclusions missing columns: {sorted(need-cols)}")
         con.execute(f"CREATE VIEW exclusions_input AS SELECT * FROM {ex_src}")
+        bad_types = con.execute(
+            "SELECT DISTINCT exclusion_type FROM exclusions_input "
+            "WHERE lower(trim(exclusion_type)) NOT IN ('phecode', 'code')"
+        ).fetchall()
+        if bad_types:
+            raise ValueError(f"Exclusions exclusion_type must be phecode or code, got: {[r[0] for r in bad_types]}")
+        bad_vocabularies = con.execute(
+            "SELECT DISTINCT vocabulary FROM exclusions_input "
+            "WHERE upper(trim(vocabulary)) NOT IN ('ICD9CM', 'ICD10CM', 'ICD10', 'SNOMED')"
+        ).fetchall()
+        if bad_vocabularies:
+            raise ValueError(f"Exclusions vocabulary must be ICD9CM, ICD10CM, ICD10, or SNOMED, got: {[r[0] for r in bad_vocabularies]}")
         if "version" in cols: exclusion_version = con.execute("SELECT min(version) FROM exclusions_input").fetchone()[0]
         con.execute("""
           INSERT INTO exclusions
@@ -133,7 +149,9 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
             ON x.exclusion_type = 'phecode' AND x.exclusion_value = m.phecode
           UNION
           SELECT DISTINCT e.person_id, x.phecode FROM exclusions_input x JOIN normalized_events e
-            ON x.exclusion_type = 'code' AND upper(trim(x.exclusion_value)) = e.normalized_code
+            ON x.exclusion_type = 'code'
+            AND upper(trim(CAST(x.vocabulary AS VARCHAR))) = e.vocabulary
+            AND regexp_replace(upper(trim(CAST(x.exclusion_value AS VARCHAR))), '[.\\s-]', '', 'g') = e.normalized_code
         """)
     # Deliberately avoids `all_phecodes CROSS JOIN cohort`: at real-world scale (thousands
     # of phecodes x hundreds of thousands of people) that intermediate is hundreds of

@@ -21,9 +21,10 @@ def test_normalization_is_presentation_only() -> None:
 
 def test_counts_before_and_after_exclusion_and_thresholds(tmp_path: Path, release: Path) -> None:
     cohort = tmp_path / "cohort.csv"; events = tmp_path / "events.csv"; exclusions = tmp_path / "exclusions.csv"
-    write_csv(cohort, ["person_id"], [[str(i)] for i in range(1, 202)])
+    write_csv(cohort, ["person_id", "sex"], [[str(i), "Female"] for i in range(1, 202)])
     write_csv(events, ["person_id", "code", "vocabulary", "event_date"], [[str(i), "123.4", "ICD9CM", "2020-01-01"] for i in range(1, 201)])
-    write_csv(exclusions, ["phecode", "exclusion_type", "exclusion_value", "version"], [["AA_1", "code", "A011", "v1"]])
+    # Exclusion codes may use presentation punctuation just like event codes.
+    write_csv(exclusions, ["phecode", "exclusion_type", "exclusion_value", "vocabulary", "version"], [["AA_1", "code", "A01.1", "ICD10CM", "v1"]])
     # Person 201 is the only non-case and has an exclusion code for AA_1.
     with events.open("a", newline="") as stream: csv.writer(stream).writerow(["201", "A01.1", "ICD10CM", "2020-01-01"])
     output = tmp_path / "run"
@@ -36,12 +37,12 @@ def test_counts_before_and_after_exclusion_and_thresholds(tmp_path: Path, releas
 
 def test_two_dates_and_case_precedence(tmp_path: Path, release: Path) -> None:
     cohort = tmp_path / "cohort.csv"; events = tmp_path / "events.csv"; exclusions = tmp_path / "exclusions.csv"
-    write_csv(cohort, ["person_id"], [["p1"], ["p2"], ["p3"]])
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Female"], ["p3", "Female"]])
     write_csv(events, ["person_id", "code", "vocabulary", "event_date"], [
         ["p1", "12345", "ICD9CM", "2020-01-01"], ["p1", "123.45", "ICD9CM", "2020-01-02"],
         ["p2", "123.45", "ICD9CM", "2020-01-01"], ["p3", "A01.1", "ICD10CM", "2020-01-01"],
     ])
-    write_csv(exclusions, ["phecode", "exclusion_type", "exclusion_value"], [["AA_1.1", "phecode", "AA_1.1"]])
+    write_csv(exclusions, ["phecode", "exclusion_type", "exclusion_value", "vocabulary"], [["AA_1.1", "phecode", "AA_1.1", "ICD9CM"]])
     output = tmp_path / "run"
     map_phecodes(release, cohort, events, output, case_rule="two-dates", exclusions=exclusions, min_cases=1, min_controls=1)
     rows = duckdb.sql(f"SELECT phecode, case_count, control_count_before_exclusions, excluded_control_count, control_count_after_exclusions FROM read_parquet('{output / 'phecode_counts.parquet'}') ORDER BY phecode").fetchall()
@@ -51,7 +52,7 @@ def test_two_dates_and_case_precedence(tmp_path: Path, release: Path) -> None:
 
 def test_invalid_input_and_unmapped_rate(tmp_path: Path, release: Path) -> None:
     cohort = tmp_path / "cohort.csv"; events = tmp_path / "events.csv"
-    write_csv(cohort, ["person_id"], [["p1"]])
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"]])
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "not-a-code", "ICD10CM"]])
     with pytest.raises(RuntimeError, match="Unmapped rate"):
         map_phecodes(release, cohort, events, tmp_path / "run", max_unmapped_rate=0)
@@ -76,7 +77,7 @@ def test_phenotype_matrix_sex_restriction_and_exclusions(tmp_path: Path) -> None
     #     control pool -- NA, not 0. p4: female non-case, no exclusion -- ordinary control (0).
     write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Male"], ["p3", "Female"], ["p4", "Female"]])
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "123.4", "ICD9CM"], ["p3", "A01.1", "ICD10CM"]])
-    write_csv(exclusions, ["phecode", "exclusion_type", "exclusion_value"], [["AA_1", "phecode", "BB_2"]])
+    write_csv(exclusions, ["phecode", "exclusion_type", "exclusion_value", "vocabulary"], [["AA_1", "phecode", "BB_2", "ICD9CM"]])
     output = tmp_path / "run"
     map_phecodes(release, cohort, events, output, exclusions=exclusions, min_cases=1, min_controls=1)
 
@@ -103,7 +104,7 @@ def test_exclude_phenotypes_drops_whole_phecodes_from_every_output(tmp_path: Pat
     build_vocabulary(source, info, release)
 
     cohort = tmp_path / "cohort.csv"; events = tmp_path / "events.csv"; exclude = tmp_path / "exclude.csv"
-    write_csv(cohort, ["person_id"], [["p1"], ["p2"]])
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Female"]])
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "123.4", "ICD9CM"], ["p2", "A01.1", "ICD10CM"]])
     write_csv(exclude, ["match_type", "match_value"], [["category", "Symptoms"]])
     output = tmp_path / "run"
@@ -121,7 +122,7 @@ def test_exclude_phenotypes_drops_whole_phecodes_from_every_output(tmp_path: Pat
 
 def test_exclude_phenotypes_by_phecode_and_category_error_without_info(tmp_path: Path, release: Path) -> None:
     cohort = tmp_path / "cohort.csv"; events = tmp_path / "events.csv"; exclude = tmp_path / "exclude.csv"
-    write_csv(cohort, ["person_id"], [["p1"]])
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"]])
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "123.4", "ICD9CM"]])
     write_csv(exclude, ["match_type", "match_value"], [["phecode", "AA_1"]])
     output = tmp_path / "run"
@@ -135,7 +136,7 @@ def test_exclude_phenotypes_by_phecode_and_category_error_without_info(tmp_path:
         map_phecodes(release, cohort, events, tmp_path / "run2", exclude_phenotypes=exclude_by_category)
 
 
-def test_phenotype_matrix_warns_without_cohort_sex_column(tmp_path: Path, capsys) -> None:
+def test_cohort_requires_sex_column(tmp_path: Path) -> None:
     source = tmp_path / "official.csv"
     write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["AA_1", "123.4", "ICD9CM"]])
     info = tmp_path / "info.csv"
@@ -147,9 +148,5 @@ def test_phenotype_matrix_warns_without_cohort_sex_column(tmp_path: Path, capsys
     write_csv(cohort, ["person_id"], [["p1"], ["p2"]])
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "123.4", "ICD9CM"]])
     output = tmp_path / "run"
-    map_phecodes(release, cohort, events, output, min_cases=1, min_controls=1)
-    assert "sex-restricted" in capsys.readouterr().err
-
-    audit = json.loads((output / "audit.json").read_text())
-    assert audit["phenotype_matrix"]["cohort_has_sex_column"] is False
-    assert audit["phenotype_matrix"]["sex_restricted_phecodes_treated_as_unrestricted"] == 1
+    with pytest.raises(ValueError, match="Cohort requires sex column"):
+        map_phecodes(release, cohort, events, output, min_cases=1, min_controls=1)

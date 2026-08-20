@@ -21,9 +21,10 @@ def main() -> None:
         description="Turn an official PhecodeX map (and, optionally, an Athena vocabulary "
                      "extract) into a versioned, checksummed release directory for map-phecodes.",
     )
-    build.add_argument("--phecodex-map", required=True, type=Path,
-                        help="Official PhecodeX unrolled ICD map CSV/Parquet "
-                             "(requires columns: phecode, ICD, vocabulary_id).")
+    build.add_argument("--phecodex-map", required=True, type=Path, action="append",
+                        help="Official PhecodeX unrolled ICD map CSV/Parquet. Repeat this "
+                             "option to combine CM and WHO maps (requires phecode, ICD/icd, "
+                             "vocabulary_id columns).")
     build.add_argument("--phecodex-info", type=Path,
                         help="Optional phecode metadata CSV/Parquet (phecode, sex, "
                              "phecode_string, category). Omit to default sex=Both and blank text.")
@@ -44,11 +45,12 @@ def main() -> None:
                       help="Release directory produced by build-vocabulary.")
     run.add_argument("--cohort", required=True, type=Path,
                       help="CSV/Parquet with one row per person (requires column: person_id, "
-                           "non-null and unique; optional column: sex, values 'Male'/'Female', "
+                           "non-null and unique; required column: sex, values 'Male'/'Female', "
                            "used to NA out sex-restricted phecodes in phenotype_matrix).")
     run.add_argument("--events", required=True, type=Path,
                       help="CSV/Parquet with one row per clinical event (requires columns: "
-                           "person_id, code, vocabulary; event_date required for --case-rule "
+                           "person_id, code, vocabulary; vocabulary is ICD9CM, ICD10CM, ICD10, "
+                           "or SNOMED; event_date required for --case-rule "
                            "two-dates).")
     run.add_argument("--output", required=True, type=Path,
                       help="Run directory to create. Must not already exist.")
@@ -57,7 +59,7 @@ def main() -> None:
                            "requires mapped events on >=2 distinct dates for the same phecode.")
     run.add_argument("--control-exclusions", type=Path,
                       help="Optional CSV/Parquet (phecode, exclusion_type, exclusion_value, "
-                           "[version]) removing people from a phecode's control pool. Cases are "
+                           "vocabulary, [version]) removing people from a phecode's control pool. Cases are "
                            "never excluded.")
     run.add_argument("--exclude-phenotypes", type=Path,
                       help="Optional CSV/Parquet (match_type, match_value) dropping whole "

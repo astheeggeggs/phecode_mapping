@@ -26,32 +26,52 @@ def _write_xlsx(path: Path, sheets: dict[str, list[tuple[list[str], list[tuple]]
     book.save(path)
 
 
-def build_vocabulary(phecodex_map: Path, phecodex_info: Path | None, output: Path, athena_dir: Path | None = None) -> None:
+def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None, output: Path, athena_dir: Path | None = None) -> None:
     if output.exists():
         raise FileExistsError(f"Output directory already exists: {output}. Remove it or choose a new --output path.")
     output.mkdir(parents=True)
     con = connect()
-    source = relation_for(phecodex_map)
-    columns = _columns(con, source)
+    map_paths = [phecodex_map] if isinstance(phecodex_map, Path) else phecodex_map
+    if not map_paths:
+        raise ValueError("At least one PhecodeX map is required")
+    sources = [relation_for(path) for path in map_paths]
+    normalized_sources = []
+    for item in sources:
+        item_columns = _columns(con, item)
+        code_column = "ICD" if "ICD" in item_columns else "icd" if "icd" in item_columns else None
+        if code_column is None or "phecode" not in item_columns or "vocabulary_id" not in item_columns:
+            raise ValueError("PhecodeX map requires columns: phecode, ICD/icd, vocabulary_id")
+        normalized_sources.append(f"SELECT phecode, {code_column} AS ICD, vocabulary_id FROM {item}")
+    source = " UNION ALL ".join(normalized_sources)
+    columns = _columns(con, f"({source})")
     missing = REQUIRED_MAP_COLUMNS - columns
     if missing:
         raise ValueError(f"PhecodeX map missing columns: {sorted(missing)}")
-    con.execute(f"CREATE VIEW source_map AS SELECT * FROM {source}")
+    con.execute(f"CREATE VIEW source_map AS SELECT * FROM ({source})")
     # Keep source ICD verbatim for traceability and a punctuation-insensitive key for joins.
     con.execute("""
         CREATE TABLE icd_map AS
-        SELECT DISTINCT phecode, ICD AS source_code, upper(vocabulary_id) AS vocabulary,
+        SELECT DISTINCT phecode, ICD AS source_code,
+               upper(vocabulary_id) AS vocabulary,
                regexp_replace(upper(trim(ICD)), '[.\\s-]', '', 'g') AS normalized_code
         FROM source_map
-        WHERE upper(vocabulary_id) IN ('ICD9CM', 'ICD10CM')
+        WHERE upper(vocabulary_id) IN ('ICD9CM', 'ICD10CM', 'ICD10')
     """)
     con.execute(f"COPY icd_map TO '{quote(output / 'icd_map.parquet')}' (FORMAT PARQUET)")
     con.execute(f"COPY icd_map TO '{quote(output / 'icd_map.csv')}' (HEADER, DELIMITER ',')")
     if phecodex_info:
         info_source = relation_for(phecodex_info)
+        info_columns = _columns(con, info_source)
+        if "phecode" in info_columns:
+            duplicate_info = con.execute(f"SELECT phecode FROM {info_source} GROUP BY phecode HAVING count(*) > 1 LIMIT 1").fetchone()
+            if duplicate_info:
+                raise ValueError(f"Phecode info contains duplicate phecode: {duplicate_info[0]}")
+        if "sex" in info_columns:
+            bad_sex = con.execute(f"SELECT DISTINCT sex FROM {info_source} WHERE upper(trim(sex)) NOT IN ('BOTH', 'MALE', 'FEMALE')").fetchall()
+            if bad_sex:
+                raise ValueError(f"Phecode info sex must be Both, Male, or Female, got: {[r[0] for r in bad_sex]}")
         con.execute(f"COPY (SELECT * FROM {info_source}) TO '{quote(output / 'phecode_info.parquet')}' (FORMAT PARQUET)")
         con.execute(f"COPY (SELECT * FROM {info_source}) TO '{quote(output / 'phecode_info.csv')}' (HEADER, DELIMITER ',')")
-        info_columns = _columns(con, info_source)
         if "phecode" in info_columns:
             con.execute(f"CREATE VIEW phecode_info AS SELECT * FROM {info_source}")
             sex = "coalesce(i.sex, 'Both')" if "sex" in info_columns else "'Both'"
@@ -102,14 +122,10 @@ def build_vocabulary(phecodex_map: Path, phecodex_info: Path | None, output: Pat
             FROM snomed s JOIN standard_concept sc ON s.concept_id = sc.snomed_id
               JOIN icd_source i ON sc.standard_id = i.standard_id
               JOIN concept ic ON i.icd_id = ic.concept_id
-              -- Athena tags WHO ICD-10 concepts as vocabulary_id='ICD10' (distinct from the US
-              -- clinical-modification 'ICD10CM'). PhecodeX map rows built from the WHO unrolled
-              -- file are relabeled 'ICD10CM' when the map is constructed (see build-vocabulary's
-              -- hybrid-map convention), so treat Athena's 'ICD10' as that same alias here too --
-              -- otherwise SNOMED codes that only cross-map through WHO ICD-10 (common for
-              -- non-US SNOMED CT extensions, e.g. the UK edition) would never bridge.
+              -- Athena tags WHO ICD-10 concepts as vocabulary_id='ICD10'; retain
+              -- that as distinct from US clinical-modification ICD10CM.
               JOIN icd_map m ON regexp_replace(upper(ic.concept_code), '[.\\s-]', '', 'g') = m.normalized_code
-                AND (CASE WHEN ic.vocabulary_id = 'ICD10' THEN 'ICD10CM' ELSE ic.vocabulary_id END) = m.vocabulary
+                AND ic.vocabulary_id = m.vocabulary
             WHERE ic.invalid_reason IS NULL
         """)
         con.execute(f"COPY snomed_map TO '{quote(output / 'snomed_map.parquet')}' (FORMAT PARQUET)")
@@ -123,9 +139,17 @@ def build_vocabulary(phecodex_map: Path, phecodex_info: Path | None, output: Pat
     })
     manifest = {
         "tool_version": __version__, "created_at_utc": dt.datetime.now(dt.UTC).isoformat(),
-        "phecodex_map": {"path": str(phecodex_map), "sha256": checksum(phecodex_map)},
+        "phecodex_map": ([{"path": str(path), "sha256": checksum(path)} for path in map_paths]
+                         if len(map_paths) > 1 else {"path": str(map_paths[0]), "sha256": checksum(map_paths[0])}),
         "phecodex_info": None if not phecodex_info else {"path": str(phecodex_info), "sha256": checksum(phecodex_info)},
         "athena_dir": None if not athena_dir else str(athena_dir),
         "counts": {"icd_map_rows": len(icd_rows), "snomed_map_rows": len(snomed_rows)},
     }
+    if phecodex_info and "sex" in info_columns:
+        manifest["phecodex_info_sex_counts"] = {
+            sex: con.execute(
+                f"SELECT count(*) FROM {info_source} WHERE upper(trim(sex)) = ?", [sex.upper()]
+            ).fetchone()[0]
+            for sex in ("Both", "Female", "Male")
+        }
     write_release_metadata(output, manifest)

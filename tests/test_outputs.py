@@ -25,7 +25,7 @@ def test_build_vocabulary_and_map_phecodes_refuse_existing_output(tmp_path: Path
     with pytest.raises(FileExistsError, match="already exists"):
         build_vocabulary(tmp_path / "official.csv", None, release)  # release dir already exists
     cohort = tmp_path / "cohort.csv"; events = tmp_path / "events.csv"
-    write_csv(cohort, ["person_id"], [["p1"]])
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"]])
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "I10", "ICD10CM"]])
     existing = tmp_path / "existing_run"; existing.mkdir()
     with pytest.raises(FileExistsError, match="already exists"):
@@ -51,7 +51,7 @@ def test_snomed_bridges_through_athena_extract(tmp_path: Path) -> None:
     assert rows == [("44054006", "EM_202")]
 
     cohort = tmp_path / "cohort.csv"; events = tmp_path / "events.csv"
-    write_csv(cohort, ["person_id"], [["p1"], ["p2"]])
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Male"]])
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", " 44054006 ", "SNOMED"], ["p2", "99999999", "SNOMED"]])
     output = tmp_path / "run"
     map_phecodes(release, cohort, events, output, min_cases=1, min_controls=1)
@@ -62,12 +62,9 @@ def test_snomed_bridges_through_athena_extract(tmp_path: Path) -> None:
 
 
 def test_snomed_bridges_through_who_icd10_alias(tmp_path: Path) -> None:
-    # Athena tags WHO ICD-10 concepts vocabulary_id='ICD10' (distinct from the US
-    # clinical-modification 'ICD10CM'); PhecodeX map rows built from the WHO unrolled file
-    # are relabeled 'ICD10CM'. The SNOMED bridge must treat Athena's 'ICD10' as that same
-    # alias, or SNOMED codes that only cross-map through WHO ICD-10 never bridge.
+    # Athena tags WHO ICD-10 concepts vocabulary_id='ICD10', distinct from US ICD10CM.
     source = tmp_path / "official.csv"
-    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["EM_202", "E11.1", "ICD10CM"]])
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["EM_202", "E11.1", "ICD10"]])
     athena = tmp_path / "athena"; athena.mkdir()
     write_csv(athena / "CONCEPT.csv", ["concept_id", "concept_code", "vocabulary_id", "domain_id", "standard_concept", "invalid_reason"], [
         [1, "44054006", "SNOMED", "Condition", "S", ""],   # standard SNOMED concept

@@ -74,6 +74,18 @@ Both commands accept CSV or Parquet for every input file, and refuse to
 overwrite an existing `--output` directory (delete it first if you're
 re-running).
 
+`--phecodex-map` may be repeated to combine unrolled maps. WHO `ICD10` rows
+retain the distinct `ICD10` vocabulary alias, and every input
+checksum is recorded in `manifest.json`:
+
+```bash
+phecodex-map build-vocabulary \
+  --phecodex-map phecodeX_unrolled_ICD_CM.csv \
+  --phecodex-map phecodeX_unrolled_ICD_WHO.csv \
+  --phecodex-info phecodeX_info_1.1_with_sex.csv \
+  --output releases/phecodex-hybrid
+```
+
 ## Data governance
 
 - **The `--release` directory** (built by `build-vocabulary`) contains no
@@ -132,6 +144,27 @@ Phecode metadata (description, category, sex restriction), also from
 PheWAS/PhecodeXVocabulary. If omitted, all phecodes are written with
 `sex="Both"` and blank description/category.
 
+For PhecodeX 1.1, use `scripts/enrich_phecodex_sex.py` with the 1.0 metadata
+and `PhecodeX changes.xlsx` to create a 1.1 metadata file with a validated
+`sex` column. Review the generated assignment CSV before using the enriched
+file as `--phecodex-info`.
+
+To package a built consortium release, run:
+
+```bash
+python scripts/package_release.py \
+  --release releases/phecodex-1.1-snomed \
+  --output distributions/phecodex-1.1-snomed.tar.gz
+```
+
+This creates the release archive and a `.sha256` checksum. Raw Athena files
+are not included; only the generated SNOMED bridge is packaged.
+
+For a hybrid CM/WHO release when no PhecodeX 1.1 WHO map is available, first
+prepare the map with `scripts/prepare_hybrid_map.py`. It combines PhecodeX 1.1
+CM with PhecodeX 1.0 WHO and records both source checksums in a sidecar
+manifest.
+
 | column | required | notes |
 |---|---|---|
 | `phecode` | yes | join key; without it the file is copied through but not joined |
@@ -168,7 +201,7 @@ One row per person to include in the run.
 | column | required | notes |
 |---|---|---|
 | `person_id` | yes | must be non-null and unique |
-| `sex` | no | `"Male"` or `"Female"` (case-insensitive). Used only to NA out sex-restricted phecodes in `phenotype_matrix` (see [Outputs](#outputs)); everything else in the pipeline ignores it. Omit it and sex-restricted phecodes simply aren't NA'd (see the warning this produces, below) |
+| `sex` | yes | `"Male"` or `"Female"` (case-insensitive); null values are retained as unknown sex. Used to NA out sex-restricted phecodes in `phenotype_matrix`. |
 
 Any other columns are ignored.
 
@@ -180,7 +213,7 @@ One row per clinical event.
 |---|---|---|
 | `person_id` | yes | events for people not in `--cohort` are ignored |
 | `code` | yes | source code, as recorded (punctuation/whitespace is stripped automatically before matching) |
-| `vocabulary` | yes | `ICD9CM`, `ICD10CM`, or `SNOMED`; anything else is left unmapped |
+| `vocabulary` | yes | `ICD9CM`, `ICD10CM`, `ICD10`, or `SNOMED`; anything else is left unmapped |
 | `event_date` | only for `--case-rule two-dates` | any date DuckDB can parse, e.g. `YYYY-MM-DD` |
 
 If your source data has UK Biobank's hospital-episode shape (one row per
@@ -237,6 +270,7 @@ takes precedence over an exclusion.
 | `phecode` | yes | the phecode this exclusion applies to |
 | `exclusion_type` | yes | `"phecode"` (match another mapped phecode) or `"code"` (match a raw source code) |
 | `exclusion_value` | yes | the phecode or code to match, per `exclusion_type` |
+| `vocabulary` | yes | `ICD9CM`, `ICD10CM`, `ICD10`, or `SNOMED`; code exclusions only match events in the same vocabulary. ICD punctuation/whitespace is normalized. Required for all rows for an unambiguous file format. |
 | `version` | no | recorded in `audit.json` for provenance; if omitted, `exclusion_version` is `null` |
 
 ## `map-phecodes` options
@@ -286,17 +320,10 @@ Each cell is one of:
   - `--control-exclusions` removes this person from that phecode's control
     pool and they aren't already a case (cases are never excluded)
 
-If any retained phecode is sex-restricted but `--cohort` has no `sex`
-column, `map-phecodes` prints a warning and leaves that phecode's column
-un-NA'd for everyone (opposite-sex people get `0` instead of blank) —
-`audit.json`'s `phenotype_matrix.sex_restricted_phecodes_treated_as_unrestricted`
-records how many columns this affected, so this can't silently pass
-unnoticed. Add a `sex` column to `--cohort` to fix it. Note that the
-official PhecodeX 1.1 `phecodeX_info.csv` does not itself include a `sex`
-column — sex-restriction is only applied if your `--phecodex-info` source
-provides one (e.g. a hand-curated addition for phecodes like
-pregnancy/prostate-specific ones); without it, no phecode is treated as
-sex-restricted and this feature is a no-op.
+The `--cohort` input must include a `sex` column so sex-restricted
+phenotypes cannot be evaluated without the information needed to identify
+opposite-sex or unknown-sex participants. Sex-restriction is applied only
+when the `--phecodex-info` source provides a valid `sex` value.
 
 Because this is a dense matrix, its size scales with cohort size × number
 of retained phecodes. Verified end-to-end against the real UK Biobank-scale

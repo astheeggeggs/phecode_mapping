@@ -11,7 +11,7 @@ def normalize_code(code: str | None, vocabulary: str | None) -> str | None:
     vocab = str(vocabulary).strip().upper()
     if not value:
         return None
-    if vocab in {"ICD9CM", "ICD10CM"}:
+    if vocab in {"ICD9CM", "ICD10CM", "ICD10"}:
         return re.sub(r"[.\s-]", "", value)
     if vocab == "SNOMED":
         return re.sub(r"\s+", "", value)
