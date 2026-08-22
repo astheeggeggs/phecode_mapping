@@ -58,6 +58,21 @@ Run the mapper:
 
 The command refuses to overwrite an existing output directory. Use
 `--exact-only` when reproducing the exact-match compatibility baseline.
+The standard workflow automatically applies the bundled recommended phenotype
+exclusions for `Symptoms`, `Neonatal`, `Infections`, and three administrative
+pregnancy-encounter phecodes. Supply `--exclude-phenotypes <file>` to use a
+reviewed alternative policy.
+
+To specify the bundled policy explicitly:
+
+```bash
+.venv/bin/phecodex-map run \
+  --release releases/phecodex-1.1-hierarchy \
+  --cohort cohort.csv \
+  --events events.csv \
+  --exclude-phenotypes src/phecodex_mapper/data/recommended_exclusions.csv \
+  --output phecodex_run
+```
 
 ## Input contract
 

@@ -30,6 +30,7 @@ if any((args.release / name).exists() for name in ("snomed_map.csv", "snomed_map
 root = Path(__file__).resolve().parents[1]
 files = [root / "README.md", root / "ANALYST_GUIDE.md", root / "pyproject.toml", root / "requirements-lock.txt", root / "examples/cohort.csv", root / "examples/events.csv", root / "scripts/verify_release.py", root / "scripts/package_distribution.py", root / "containers/Dockerfile", root / "containers/.dockerignore", root / "containers/Singularity.def"]
 files += list((root / "src").rglob("*.py"))
+files += list((root / "src/phecodex_mapper/data").glob("*.csv"))
 args.output.parent.mkdir(parents=True, exist_ok=True)
 with tarfile.open(args.output, "w:gz") as archive:
     for path in files:

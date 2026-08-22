@@ -71,6 +71,21 @@ people. Keep all person-level files secure. Use `audit.json`,
 `phecode_counts_hierarchy.parquet`, and `hierarchy_fallbacks.csv` for QC.
 
 Use `--exact-only` only when reproducing the exact-match compatibility baseline.
+The standard `run` command automatically applies the bundled recommended
+exclusions for Symptoms, Neonatal, Infections, and three administrative
+pregnancy-encounter phecodes. Supply `--exclude-phenotypes <file>` to replace
+them with a reviewed study-specific policy.
+
+To specify the bundled policy explicitly:
+
+```bash
+.venv/bin/phecodex-map run \
+  --release release \
+  --cohort cohort.csv \
+  --events events.csv \
+  --exclude-phenotypes src/phecodex_mapper/data/recommended_exclusions.csv \
+  --output phecodex_run
+```
 
 ## Containers
 

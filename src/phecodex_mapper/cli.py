@@ -10,6 +10,8 @@ from .validation import validate_phecodex_counts
 from .vocabulary import build_vocabulary
 from .workflow import preflight, run_workflow
 
+DEFAULT_EXCLUSIONS = Path(__file__).with_name("data") / "recommended_exclusions.csv"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -25,7 +27,9 @@ def main() -> None:
     workflow.add_argument("--output", required=True, type=Path)
     workflow.add_argument("--case-rule", choices=["any-event", "two-dates"], default="any-event")
     workflow.add_argument("--control-exclusions", type=Path)
-    workflow.add_argument("--exclude-phenotypes", type=Path)
+    workflow.add_argument("--exclude-phenotypes", type=Path,
+                          help="Phenotype exclusions. Defaults to the bundled recommended exclusions "
+                               "(Symptoms, Neonatal, Infections, and administrative pregnancy codes).")
     workflow.add_argument("--min-cases", type=int, default=200)
     workflow.add_argument("--min-controls", type=int, default=200)
     workflow.add_argument("--max-unmapped-rate", type=float, default=1.0)
@@ -121,10 +125,11 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.command == "run":
+            exclude_phenotypes = args.exclude_phenotypes or DEFAULT_EXCLUSIONS
             if args.preflight_only:
                 print(json.dumps(preflight(args.release, args.cohort, args.events, not args.exact_only), indent=2, sort_keys=True))
             else:
-                audit = run_workflow(release=args.release, cohort=args.cohort, events=args.events, output=args.output, case_rule=args.case_rule, exclusions=args.control_exclusions, exclude_phenotypes=args.exclude_phenotypes, min_cases=args.min_cases, min_controls=args.min_controls, max_unmapped_rate=args.max_unmapped_rate, exact_only=args.exact_only)
+                audit = run_workflow(release=args.release, cohort=args.cohort, events=args.events, output=args.output, case_rule=args.case_rule, exclusions=args.control_exclusions, exclude_phenotypes=exclude_phenotypes, min_cases=args.min_cases, min_controls=args.min_controls, max_unmapped_rate=args.max_unmapped_rate, exact_only=args.exact_only)
                 print(json.dumps({"output": str(args.output), "mapping_variant": audit["mapping_variant"], "matrix_columns": audit.get("phenotype_matrix", {}).get("n_columns")}, indent=2))
         elif args.command == "build-vocabulary":
             hierarchy = []
