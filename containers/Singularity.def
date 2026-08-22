@@ -1,0 +1,29 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%files
+    requirements-lock.txt /opt/phecodex/requirements-lock.txt
+    pyproject.toml /opt/phecodex/pyproject.toml
+    README.md /opt/phecodex/README.md
+    ANALYST_GUIDE.md /opt/phecodex/ANALYST_GUIDE.md
+    src /opt/phecodex/src
+    scripts/verify_release.py /opt/phecodex/scripts/verify_release.py
+
+%post
+    cd /opt/phecodex
+    python -m pip install --no-cache-dir --upgrade pip
+    python -m pip install --no-cache-dir -r requirements-lock.txt
+    python -m pip install --no-cache-dir .
+    python -m pip cache purge
+
+%environment
+    export PHECODEX_HOME=/opt/phecodex
+    export PYTHONDONTWRITEBYTECODE=1
+    export PYTHONUNBUFFERED=1
+
+%runscript
+    exec phecodex-map "$@"
+
+%labels
+    Author PhecodeX consortium
+    Description Pinned PhecodeX analyst mapper

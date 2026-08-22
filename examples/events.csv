@@ -1,0 +1,3 @@
+person_id,code,vocabulary,event_date
+example-001,A01.1,ICD10,2020-01-01
+example-002,123.4,ICD9CM,2020-01-02

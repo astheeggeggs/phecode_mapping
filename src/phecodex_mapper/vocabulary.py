@@ -26,7 +26,7 @@ def _write_xlsx(path: Path, sheets: dict[str, list[tuple[list[str], list[tuple]]
     book.save(path)
 
 
-def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None, output: Path, athena_dir: Path | None = None) -> None:
+def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None, output: Path, athena_dir: Path | None = None, icd_hierarchy: list[tuple[str, Path]] | None = None) -> None:
     if output.exists():
         raise FileExistsError(f"Output directory already exists: {output}. Remove it or choose a new --output path.")
     output.mkdir(parents=True)
@@ -59,6 +59,35 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
     """)
     con.execute(f"COPY icd_map TO '{quote(output / 'icd_map.parquet')}' (FORMAT PARQUET)")
     con.execute(f"COPY icd_map TO '{quote(output / 'icd_map.csv')}' (HEADER, DELIMITER ',')")
+    hierarchy_manifest = []
+    if icd_hierarchy:
+        con.execute("CREATE TABLE icd_hierarchy(vocabulary VARCHAR, parent_code VARCHAR, child_code VARCHAR, source_version VARCHAR)")
+        for vocabulary, hierarchy_path in icd_hierarchy:
+            vocabulary = vocabulary.upper()
+            if vocabulary not in {"ICD9CM", "ICD10", "ICD10CM"}:
+                raise ValueError(f"Unsupported hierarchy vocabulary: {vocabulary}")
+            source_h = relation_for(hierarchy_path)
+            hierarchy_columns = _columns(con, source_h)
+            required_hierarchy = {"vocabulary", "parent_code", "child_code", "source_version"}
+            if required_hierarchy - hierarchy_columns:
+                raise ValueError(f"Hierarchy file {hierarchy_path} missing columns: {sorted(required_hierarchy-hierarchy_columns)}")
+            con.execute(f"""INSERT INTO icd_hierarchy
+                SELECT '{vocabulary}', regexp_replace(upper(trim(CAST(parent_code AS VARCHAR))), '[.\\s-]', '', 'g'),
+                       regexp_replace(upper(trim(CAST(child_code AS VARCHAR))), '[.\\s-]', '', 'g'),
+                       CAST(source_version AS VARCHAR) FROM {source_h}
+                WHERE upper(trim(CAST(vocabulary AS VARCHAR))) = '{vocabulary}'""")
+            if con.execute(f"SELECT count(*) FROM {source_h} WHERE upper(trim(CAST(vocabulary AS VARCHAR))) <> '{vocabulary}'").fetchone()[0]:
+                raise ValueError(f"Hierarchy file {hierarchy_path} contains a vocabulary different from {vocabulary}")
+            if con.execute("SELECT count(*) FROM icd_hierarchy WHERE vocabulary=? AND (source_version IS NULL OR trim(source_version)='')", [vocabulary]).fetchone()[0]:
+                raise ValueError(f"Hierarchy file {hierarchy_path} contains a blank source_version")
+            rows = con.execute("SELECT count(*) FROM icd_hierarchy WHERE vocabulary=?", [vocabulary]).fetchone()[0]
+            versions = [r[0] for r in con.execute("SELECT DISTINCT source_version FROM icd_hierarchy WHERE vocabulary=? ORDER BY source_version", [vocabulary]).fetchall()]
+            hierarchy_manifest.append({"vocabulary": vocabulary, "path": str(hierarchy_path), "sha256": checksum(hierarchy_path), "rows": rows, "source_versions": versions})
+        if con.execute("SELECT count(*) FROM icd_hierarchy WHERE parent_code = child_code OR length(parent_code) >= length(child_code)").fetchone()[0]:
+            raise ValueError("Hierarchy parent_code must be shorter than child_code and cannot equal it")
+        if con.execute("SELECT 1 FROM icd_hierarchy GROUP BY vocabulary, child_code HAVING count(DISTINCT parent_code) > 1 LIMIT 1").fetchone():
+            raise ValueError("Hierarchy contains conflicting parents for a child code")
+        con.execute(f"COPY icd_hierarchy TO '{quote(output / 'icd_hierarchy.parquet')}' (FORMAT PARQUET)")
     if phecodex_info:
         info_source = relation_for(phecodex_info)
         info_columns = _columns(con, info_source)
@@ -142,6 +171,7 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         "phecodex_map": ([{"path": str(path), "sha256": checksum(path)} for path in map_paths]
                          if len(map_paths) > 1 else {"path": str(map_paths[0]), "sha256": checksum(map_paths[0])}),
         "phecodex_info": None if not phecodex_info else {"path": str(phecodex_info), "sha256": checksum(phecodex_info)},
+        "icd_hierarchy": hierarchy_manifest,
         "athena_dir": None if not athena_dir else str(athena_dir),
         "counts": {"icd_map_rows": len(icd_rows), "snomed_map_rows": len(snomed_rows)},
     }

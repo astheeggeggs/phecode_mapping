@@ -1,0 +1,133 @@
+# PhecodeX analyst guide
+
+This bundle converts canonical cohort and clinical-event files into a binary
+PhecodeX phenotype matrix for downstream RVAS analysis. It runs locally or in
+your secure compute environment; individual-level inputs and outputs must not
+leave that environment.
+
+## Install and verify
+
+Use Python 3.11 or newer:
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements-lock.txt
+.venv/bin/pip install .
+```
+
+Verify the shared release:
+
+```bash
+.venv/bin/python scripts/verify_release.py \
+  --release release \
+  --hierarchy-aware
+```
+
+## Required inputs
+
+`cohort.csv` must contain one row per person:
+
+```text
+person_id,sex
+```
+
+`events.csv` must contain one row per diagnosis/clinical event:
+
+```text
+person_id,code,vocabulary,event_date
+```
+
+`event_date` may be omitted for the default one-event case rule. Supported
+vocabularies are `ICD9CM`, `ICD10`, `ICD10CM`, and `SNOMED`. Sex must be
+`Male`, `Female`, or blank.
+
+## Preflight and run
+
+Validate inputs without processing them:
+
+```bash
+.venv/bin/phecodex-map run \
+  --release release --cohort cohort.csv --events events.csv \
+  --output phecodex_run --preflight-only
+```
+
+Run the standard hierarchy-aware policy:
+
+```bash
+.venv/bin/phecodex-map run \
+  --release release --cohort cohort.csv --events events.csv \
+  --output phecodex_run
+```
+
+The primary RVAS input is:
+
+```text
+phenotype_matrix_hierarchy.csv.gz
+```
+
+It contains `person_id` plus one column per retained PhecodeX trait. Values
+are `1` for cases, `0` for ordinary controls, and blank for non-evaluable
+people. Keep all person-level files secure. Use `audit.json`,
+`phecode_counts_hierarchy.parquet`, and `hierarchy_fallbacks.csv` for QC.
+
+Use `--exact-only` only when reproducing the exact-match compatibility baseline.
+
+## Containers
+
+The repository includes `containers/Dockerfile` and
+`containers/Singularity.def`. They install the pinned dependencies and mapper;
+they do not contain the release or any cohort data.
+
+The standard analyst distribution is ICD-only and does not include
+SNOMED/Athena-derived mapping tables. SNOMED support remains available in the
+advanced build workflow for sites with the appropriate licensing, but those
+outputs must not be added to the shared analyst bundle.
+
+Build and test Docker locally:
+
+```bash
+docker build -f containers/Dockerfile -t phecodex-mapper:1.1 .
+docker run --rm phecodex-mapper:1.1 --help
+```
+
+Run against local files by mounting only the secure input/output directories:
+
+```bash
+docker run --rm \
+  -v "$PWD/release:/data/release:ro" \
+  -v "$PWD/input:/data/input:ro" \
+  -v "$PWD/output:/data/output" \
+  phecodex-mapper:1.1 run \
+    --release /data/release \
+    --cohort /data/input/cohort.csv \
+    --events /data/input/events.csv \
+    --output /data/output/phecodex_run
+```
+
+Build an Apptainer/Singularity image on a build host:
+
+```bash
+apptainer build phecodex-mapper-1.1.sif containers/Singularity.def
+```
+
+On clusters where unprivileged builds are required, build the image on an
+approved host or use an administrator-provided `--fakeroot`/remote-builder
+workflow. Run it without copying cohort data into the image:
+
+```bash
+apptainer exec \
+  --bind /secure/release:/data/release:ro \
+  --bind /secure/input:/data/input:ro \
+  --bind /secure/output:/data/output \
+  phecodex-mapper-1.1.sif \
+  phecodex-map run \
+    --release /data/release \
+    --cohort /data/input/cohort.csv \
+    --events /data/input/events.csv \
+    --output /data/output/phecodex_run
+```
+
+Verify the release separately before running the container. Never use Docker
+build context or container bind mounts that include Athena source files,
+individual-level data, or generated cohort outputs unless they are explicitly
+needed at runtime and remain on secure storage.

@@ -68,7 +68,7 @@ def _load_excluded_phecodes(con, release: Path, exclude_phenotypes: Path | None)
     return con.execute("SELECT count(*) FROM excluded_phecodes").fetchone()[0]
 
 
-def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_rule: str = "any-event", exclusions: Path | None = None, min_cases: int = 200, min_controls: int = 200, max_unmapped_rate: float = 1.0, exclude_phenotypes: Path | None = None) -> None:
+def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_rule: str = "any-event", exclusions: Path | None = None, min_cases: int = 200, min_controls: int = 200, max_unmapped_rate: float = 1.0, exclude_phenotypes: Path | None = None, hierarchy_aware: bool = False) -> None:
     if case_rule not in {"any-event", "two-dates"}:
         raise ValueError("case_rule must be any-event or two-dates")
     if output.exists():
@@ -124,12 +124,14 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
         con.execute(f"CREATE TABLE cases AS SELECT person_id, phecode FROM mapped_events WHERE event_date IS NOT NULL AND {not_excluded} GROUP BY person_id,phecode HAVING count(DISTINCT event_date) >= 2")
     con.execute(f"CREATE TABLE all_phecodes AS SELECT DISTINCT phecode FROM mapped_events WHERE {not_excluded}")
     con.execute("CREATE TABLE exclusions(person_id VARCHAR, phecode VARCHAR)")
+    con.execute("CREATE TABLE exclusions_input(phecode VARCHAR, exclusion_type VARCHAR, exclusion_value VARCHAR, vocabulary VARCHAR)")
     exclusion_version = None
     if exclusions:
         ex_src = relation_for(exclusions); cols = _columns(con, ex_src)
         need = {"phecode", "exclusion_type", "exclusion_value", "vocabulary"}
         if need - cols: raise ValueError(f"Exclusions missing columns: {sorted(need-cols)}")
-        con.execute(f"CREATE VIEW exclusions_input AS SELECT * FROM {ex_src}")
+        con.execute("DROP TABLE exclusions_input")
+        con.execute(f"CREATE TABLE exclusions_input AS SELECT * FROM {ex_src}")
         bad_types = con.execute(
             "SELECT DISTINCT exclusion_type FROM exclusions_input "
             "WHERE lower(trim(exclusion_type)) NOT IN ('phecode', 'code')"
@@ -190,6 +192,10 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
 
     matrix_info = _write_phenotype_matrix(con, release, output, has_sex)
 
+    hierarchy_info = None
+    if hierarchy_aware:
+        hierarchy_info = _write_hierarchy_variant(con, release, output, has_sex, case_rule, min_cases, min_controls)
+
     total = con.execute("SELECT count(*) FROM normalized_events").fetchone()[0]; unmapped = con.execute("SELECT count(*) FROM unmapped_events").fetchone()[0]
     rate = unmapped / total if total else 0
     audit = {"created_at_utc": dt.datetime.now(dt.UTC).isoformat(), "release": str(release), "case_rule": case_rule,
@@ -197,12 +203,95 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
              "exclude_phenotypes": None if not exclude_phenotypes else {"file": str(exclude_phenotypes), "phecodes_excluded": excluded_phecode_count},
              "events": total, "unmapped_events": unmapped, "unmapped_rate": rate,
              "release_manifest_sha256": checksum(release / "manifest.json"),
-             "phenotype_matrix": matrix_info}
+             "phenotype_matrix": matrix_info, "hierarchy_aware": hierarchy_info}
     (output / "audit.json").write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n")
     if rate > max_unmapped_rate: raise RuntimeError(f"Unmapped rate {rate:.3%} exceeds threshold {max_unmapped_rate:.3%}")
 
 
-def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> dict:
+def _write_hierarchy_variant(con, release: Path, output: Path, has_sex: bool, case_rule: str, min_cases: int, min_controls: int) -> dict:
+    hierarchy_path = release / "icd_hierarchy.parquet"
+    if not hierarchy_path.exists():
+        raise ValueError("--hierarchy-aware requires a release containing icd_hierarchy.parquet")
+    con.execute(f"CREATE VIEW icd_hierarchy AS SELECT * FROM read_parquet('{quote(hierarchy_path)}')")
+    con.execute("""
+      CREATE TABLE mapped_events_hierarchy AS
+      WITH exact AS (
+        SELECT e.event_id, e.person_id, m.phecode, e.event_date, 'exact' AS mapping_type,
+               e.source_code, e.normalized_code, e.vocabulary AS source_vocabulary,
+               e.normalized_code AS matched_icd_code, CAST(NULL AS VARCHAR) AS hierarchy_source_version
+        FROM normalized_events e JOIN icd_map m
+          ON e.vocabulary = m.vocabulary AND e.normalized_code = m.normalized_code
+      ), fallback_candidates AS (
+        SELECT e.event_id, e.person_id, m.phecode, e.event_date, 'parent_fallback' AS mapping_type,
+               e.source_code, e.normalized_code, e.vocabulary AS source_vocabulary,
+               h.parent_code AS matched_icd_code, h.source_version AS hierarchy_source_version,
+               max(length(h.parent_code)) OVER (PARTITION BY e.event_id) AS max_parent_length
+        FROM normalized_events e JOIN icd_hierarchy h ON e.vocabulary = h.vocabulary AND e.normalized_code = h.child_code
+        JOIN icd_map m ON m.vocabulary = h.vocabulary AND m.normalized_code = h.parent_code
+        WHERE e.vocabulary IN ('ICD9CM', 'ICD10', 'ICD10CM')
+          AND NOT EXISTS (SELECT 1 FROM icd_map exact_map WHERE exact_map.vocabulary=e.vocabulary AND exact_map.normalized_code=e.normalized_code)
+      )
+      SELECT event_id, person_id, phecode, event_date, mapping_type, source_code, normalized_code,
+             source_vocabulary, matched_icd_code, hierarchy_source_version FROM exact
+      UNION ALL
+      SELECT event_id, person_id, phecode, event_date, mapping_type, source_code, normalized_code,
+             source_vocabulary, matched_icd_code, hierarchy_source_version FROM fallback_candidates
+      WHERE length(matched_icd_code)=max_parent_length
+    """)
+    con.execute("CREATE TABLE unmapped_events_hierarchy AS SELECT e.* FROM normalized_events e WHERE normalized_code IS NULL OR NOT EXISTS (SELECT 1 FROM mapped_events_hierarchy m WHERE m.event_id=e.event_id)")
+    con.execute("CREATE TABLE exclusions_hierarchy(person_id VARCHAR, phecode VARCHAR)")
+    if _columns(con, "exclusions_input"):
+        con.execute("""
+          INSERT INTO exclusions_hierarchy
+          SELECT DISTINCT m.person_id, x.phecode FROM exclusions_input x JOIN mapped_events_hierarchy m
+            ON x.exclusion_type = 'phecode' AND x.exclusion_value = m.phecode
+          UNION
+          SELECT DISTINCT e.person_id, x.phecode FROM exclusions_input x JOIN normalized_events e
+            ON x.exclusion_type = 'code'
+            AND upper(trim(CAST(x.vocabulary AS VARCHAR))) = e.vocabulary
+            AND regexp_replace(upper(trim(CAST(x.exclusion_value AS VARCHAR))), '[.\\s-]', '', 'g') = e.normalized_code
+        """)
+    not_excluded = "phecode NOT IN (SELECT phecode FROM excluded_phecodes)"
+    if case_rule == "any-event":
+        con.execute(f"CREATE TABLE cases_hierarchy AS SELECT DISTINCT person_id, phecode FROM mapped_events_hierarchy WHERE {not_excluded}")
+    else:
+        con.execute(f"CREATE TABLE cases_hierarchy AS SELECT person_id, phecode FROM mapped_events_hierarchy WHERE event_date IS NOT NULL AND {not_excluded} GROUP BY person_id,phecode HAVING count(DISTINCT event_date) >= 2")
+    con.execute("""CREATE TABLE phecode_counts_hierarchy AS
+      SELECT p.phecode, coalesce(cc.case_count,0) AS case_count,
+        (SELECT count(*) FROM cohort)-coalesce(cc.case_count,0) AS control_count_before_exclusions,
+        coalesce(ec.excluded_count,0) AS excluded_control_count,
+        (SELECT count(*) FROM cohort)-coalesce(cc.case_count,0)-coalesce(ec.excluded_count,0) AS control_count_after_exclusions
+      FROM (SELECT DISTINCT phecode FROM mapped_events_hierarchy WHERE phecode NOT IN (SELECT phecode FROM excluded_phecodes)) p
+      LEFT JOIN (SELECT phecode,count(DISTINCT person_id) case_count FROM cases_hierarchy GROUP BY phecode) cc USING(phecode)
+      LEFT JOIN (SELECT ex.phecode,count(DISTINCT ex.person_id) excluded_count FROM exclusions_hierarchy ex LEFT JOIN cases_hierarchy ca ON ca.phecode=ex.phecode AND ca.person_id=ex.person_id WHERE ca.person_id IS NULL GROUP BY ex.phecode) ec USING(phecode)
+    """)
+    con.execute(f"ALTER TABLE phecode_counts_hierarchy ADD COLUMN retained BOOLEAN; UPDATE phecode_counts_hierarchy SET retained=case_count >= {int(min_cases)} AND control_count_after_exclusions >= {int(min_controls)}")
+    con.execute(f"COPY phecode_counts_hierarchy TO '{quote(output / 'phecode_counts_hierarchy.parquet')}' (FORMAT PARQUET)")
+    hierarchy_rows = con.execute("SELECT * FROM phecode_counts_hierarchy WHERE retained ORDER BY phecode").fetchall()
+    hierarchy_headers = [r[0] for r in con.execute("DESCRIBE phecode_counts_hierarchy").fetchall()]
+    _xlsx(output / "eligible_phecodes_hierarchy.xlsx", hierarchy_headers, hierarchy_rows)
+    con.execute(f"COPY (SELECT * FROM cases_hierarchy) TO '{quote(output / 'person_phecodes_hierarchy.parquet')}' (FORMAT PARQUET)")
+    con.execute(f"COPY unmapped_events_hierarchy TO '{quote(output / 'unmapped_events_hierarchy.csv')}' (HEADER, DELIMITER ',')")
+    con.execute(f"""COPY (
+      SELECT source_code, normalized_code, source_vocabulary AS vocabulary,
+             matched_icd_code AS parent_code, phecode, mapping_type,
+             hierarchy_source_version,
+             length(normalized_code) - length(matched_icd_code) AS parent_depth,
+             count(DISTINCT event_id) AS event_count
+      FROM mapped_events_hierarchy WHERE mapping_type='parent_fallback'
+      GROUP BY source_code, normalized_code, source_vocabulary, matched_icd_code,
+               phecode, mapping_type, hierarchy_source_version
+      ORDER BY event_count DESC, vocabulary, parent_code, phecode
+    ) TO '{quote(output / 'hierarchy_fallbacks.csv')}' (HEADER, DELIMITER ',')""")
+    matrix = _write_phenotype_matrix(con, release, output, has_sex, "_hierarchy", "exclusions_hierarchy")
+    fallback = con.execute("SELECT count(DISTINCT event_id), count(DISTINCT normalized_code) FROM mapped_events_hierarchy WHERE mapping_type='parent_fallback'").fetchone()
+    unmapped = con.execute("SELECT count(*) FROM unmapped_events_hierarchy").fetchone()[0]
+    by_vocab = {r[0]: r[1] for r in con.execute("SELECT source_vocabulary,count(DISTINCT event_id) FROM mapped_events_hierarchy WHERE mapping_type='parent_fallback' GROUP BY source_vocabulary").fetchall()}
+    depths = {str(r[0]): r[1] for r in con.execute("SELECT length(normalized_code)-length(matched_icd_code), count(DISTINCT event_id) FROM mapped_events_hierarchy WHERE mapping_type='parent_fallback' GROUP BY 1 ORDER BY 1").fetchall()}
+    return {"fallback_events": fallback[0], "fallback_codes": fallback[1], "fallback_events_by_vocabulary": by_vocab, "fallback_events_by_parent_depth": depths, "unmapped_events": unmapped, "phenotype_matrix": matrix}
+
+
+def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool, suffix: str = "", exclusions_table: str = "exclusions") -> dict:
     """Write a wide person x phecode matrix: 1 = case, 0 = control, NA = not
     evaluable (sex-restricted phecode and person's sex doesn't match / is
     unknown, or the person is covered by a control exclusion for that
@@ -220,7 +309,9 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
                 if sex in ("MALE", "FEMALE"):
                     phecode_sex[phecode] = sex
 
-    retained_phecodes = [r[0] for r in con.execute("SELECT phecode FROM phecode_counts WHERE retained ORDER BY phecode").fetchall()]
+    counts_table = "phecode_counts" + suffix
+    cases_table = "cases" + suffix
+    retained_phecodes = [r[0] for r in con.execute(f"SELECT phecode FROM {counts_table} WHERE retained ORDER BY phecode").fetchall()]
     sex_restricted_retained = [p for p in retained_phecodes if p in phecode_sex]
     if sex_restricted_retained and not has_sex:
         # Not fatal: without a cohort sex column we cannot tell an ineligible
@@ -234,7 +325,7 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
               file=sys.stderr)
 
     if not retained_phecodes:
-        con.execute("CREATE TABLE phenotype_matrix AS SELECT person_id FROM cohort ORDER BY person_id")
+        con.execute(f"CREATE TABLE phenotype_matrix{suffix} AS SELECT person_id FROM cohort ORDER BY person_id")
     else:
         # Deliberately avoids `cohort CROSS JOIN retained_phecodes` (and DuckDB's PIVOT over
         # a large IN-list, which internally rescans its source once per pivot value): at
@@ -248,14 +339,14 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
         # -- a single GROUP BY pass over the sparse table, however many columns there are.
         # 1 = case, -1 = excluded-from-controls; MAX(1, -1) = 1 so a case always wins over
         # an exclusion for the same person+phecode, matching "a case is never excluded".
-        con.execute("CREATE TABLE retained_phecodes(phecode VARCHAR, restrict_sex VARCHAR)")
-        con.executemany("INSERT INTO retained_phecodes VALUES (?, ?)",
+        con.execute(f"CREATE TABLE retained_phecodes{suffix}(phecode VARCHAR, restrict_sex VARCHAR)")
+        con.executemany(f"INSERT INTO retained_phecodes{suffix} VALUES (?, ?)",
                          [(p, phecode_sex.get(p)) for p in retained_phecodes])
-        con.execute("""
-          CREATE TABLE sparse_values AS
-          SELECT ca.person_id, ca.phecode, 1 AS value FROM cases ca JOIN retained_phecodes rp ON rp.phecode = ca.phecode
+        con.execute(f"""
+          CREATE TABLE sparse_values{suffix} AS
+          SELECT ca.person_id, ca.phecode, 1 AS value FROM {cases_table} ca JOIN retained_phecodes{suffix} rp ON rp.phecode = ca.phecode
           UNION ALL
-          SELECT ex.person_id, ex.phecode, -1 AS value FROM exclusions ex JOIN retained_phecodes rp ON rp.phecode = ex.phecode
+          SELECT ex.person_id, ex.phecode, -1 AS value FROM {exclusions_table} ex JOIN retained_phecodes{suffix} rp ON rp.phecode = ex.phecode
         """)
 
         def sql_literal(value: str | None) -> str:
@@ -281,7 +372,7 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
             )
             con.execute(f"""
               CREATE TEMP TABLE batch_agg AS
-              SELECT person_id, {agg_columns} FROM sparse_values WHERE phecode IN ({batch_in_list}) GROUP BY person_id
+              SELECT person_id, {agg_columns} FROM sparse_values{suffix} WHERE phecode IN ({batch_in_list}) GROUP BY person_id
             """)
             final_columns = ", ".join(
                 f"""CASE WHEN {sql_literal(phecode_sex.get(p))} IS NOT NULL AND (c.sex IS NULL OR c.sex <> {sql_literal(phecode_sex.get(p))}) THEN NULL """
@@ -290,7 +381,7 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
                 f"""ELSE 0 END AS {quote_ident(p)}"""
                 for p in batch
             )
-            table_name = f"matrix_batch_{batch_start}"
+            table_name = f"matrix_batch{suffix}_{batch_start}"
             con.execute(f"""
               CREATE TABLE {table_name} AS
               SELECT c.person_id, {final_columns} FROM cohort c LEFT JOIN batch_agg pa ON pa.person_id = c.person_id
@@ -300,14 +391,15 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
 
         join_clause = " JOIN ".join(batch_tables) if len(batch_tables) == 1 else \
             batch_tables[0] + "".join(f" JOIN {t} USING (person_id)" for t in batch_tables[1:])
-        con.execute(f"CREATE TABLE phenotype_matrix AS SELECT * FROM {join_clause} ORDER BY person_id")
+        con.execute(f"CREATE TABLE phenotype_matrix{suffix} AS SELECT * FROM {join_clause} ORDER BY person_id")
         for table_name in batch_tables:
             con.execute(f"DROP TABLE {table_name}")
     # Compressed: this is a dense matrix (cohort_size x retained_phecode_count), which at
     # real biobank scale is large -- gzip the CSV, and use zstd (better ratio than the
     # Parquet default) for the Parquet copy.
-    con.execute(f"COPY phenotype_matrix TO '{quote(output / 'phenotype_matrix.parquet')}' (FORMAT PARQUET, COMPRESSION ZSTD)")
-    con.execute(f"COPY phenotype_matrix TO '{quote(output / 'phenotype_matrix.csv.gz')}' (HEADER, DELIMITER ',', COMPRESSION 'gzip')")
+    output_stem = "phenotype_matrix" + suffix
+    con.execute(f"COPY phenotype_matrix{suffix} TO '{quote(output / (output_stem + '.parquet'))}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+    con.execute(f"COPY phenotype_matrix{suffix} TO '{quote(output / (output_stem + '.csv.gz'))}' (HEADER, DELIMITER ',', COMPRESSION 'gzip')")
     return {
         "n_columns": len(retained_phecodes),
         "cohort_has_sex_column": has_sex,

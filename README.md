@@ -70,6 +70,48 @@ phecodex-map map-phecodes \
   --output runs/site-a
 ```
 
+### Standard analyst workflow
+
+Analysts should normally use the single `run` command. It performs input
+preflight validation and uses the approved hierarchy-aware policy by default:
+
+```bash
+phecodex-map run \
+  --release releases/phecodex-1.1-hierarchy \
+  --cohort cohort.csv \
+  --events events.csv \
+  --output phecodex_run
+```
+
+The command requires a cohort with `person_id,sex` and events with
+`person_id,code,vocabulary` (plus `event_date` when using `--case-rule
+two-dates`). Use `--preflight-only` to validate these files without mapping.
+Use `--exact-only` only for compatibility comparisons. A standard run writes
+the hierarchy-aware binary phenotype matrix, compressed CSV, Parquet counts,
+`audit.json`, unmapped-event QC, and the aggregate hierarchy fallback report.
+
+Verify a shared release before use:
+
+```bash
+python scripts/verify_release.py \
+  --release releases/phecodex-1.1-hierarchy \
+  --hierarchy-aware
+```
+
+The phenotype matrix has one row per cohort person and one column per retained
+PhecodeX trait. Values are `1` for cases, `0` for ordinary controls, and blank
+for people who are not evaluable because of sex restrictions or control
+exclusions. Keep the matrix and `person_id` file in the secure environment;
+share only aggregate counts and `audit.json` unless your governance process
+explicitly permits otherwise.
+
+For distribution to new analysts, use `ANALYST_GUIDE.md` from the release
+bundle. It contains the pinned dependency installation, input contract,
+preflight command, standard run command, and RVAS hand-off. The high-level run
+records SHA-256 checksums for cohort/events and optional exclusion inputs in
+`audit.json`, together with row counts, vocabulary counts, unknown-person event
+counts, and an upper-bound matrix-size estimate.
+
 Both commands accept CSV or Parquet for every input file, and refuse to
 overwrite an existing `--output` directory (delete it first if you're
 re-running).
@@ -85,6 +127,57 @@ phecodex-map build-vocabulary \
   --phecodex-info phecodeX_info_1.1_with_sex.csv \
   --output releases/phecodex-hybrid
 ```
+
+### Optional hierarchy-aware ICD mapping
+
+The official unrolled PhecodeX map expands phecodes to their descendant ICD
+codes; it does not mean that every descendant ICD code can be inferred from a
+mapped parent. For that policy, provide explicit, versioned parent-child
+reference tables. Each table must contain `vocabulary`, `parent_code`,
+`child_code`, and `source_version`. Supported vocabularies are `ICD9CM`,
+`ICD10`, and `ICD10CM`.
+
+```bash
+phecodex-map build-vocabulary \
+  --phecodex-map phecodeX_unrolled_ICD_CM.csv \
+  --phecodex-map phecodeX_unrolled_ICD_WHO.csv \
+  --phecodex-info phecodeX_info_1.1_with_sex.csv \
+  --icd-hierarchy ICD9CM:/secure/refs/icd9cm_hierarchy.csv \
+  --icd-hierarchy ICD10:/secure/refs/icd10_hierarchy.csv \
+  --icd-hierarchy ICD10CM:/secure/refs/icd10cm_hierarchy.csv \
+  --output releases/phecodex-1.1-hierarchy
+```
+
+The release records each hierarchy file's checksum, row count, and source
+version in `manifest.json`, and writes the normalized reference as
+`icd_hierarchy.parquet`. Hierarchy-aware matching is the default when this
+metadata is present. Use `--exact-only` to disable fallback; `--hierarchy-aware`
+may also be supplied explicitly. The default mode produces the exact result
+and a separate fallback result in the same run. A failed exact match may then inherit
+all mappings from the most specific explicitly validated mapped parent in the
+same vocabulary; no string-prefix inference or cross-vocabulary fallback is
+performed.
+
+Hierarchy mode writes the additional `_hierarchy` counts, person-level case,
+and phenotype-matrix outputs, plus `unmapped_events_hierarchy.csv` and the
+aggregate-only `hierarchy_fallbacks.csv`. Review that report by event count,
+parent code, vocabulary, phecode, and source version before using the
+hierarchy result for production analyses. It is a separately versioned mapping
+policy; the exact output remains available as the compatibility baseline.
+
+To compare a completed run without loading participant-level data into a
+spreadsheet, run:
+
+```bash
+python scripts/compare_exact_hierarchy.py \
+  --run runs/site-a \
+  --output runs/site-a-hierarchy-comparison
+```
+
+This writes `comparison_summary.json`, `fallback_by_vocabulary.csv`,
+`fallback_by_parent_and_phecode.csv`, and `changed_phecodes.csv`. The summary
+also checks that the exact unmapped count equals hierarchy fallbacks plus
+hierarchy-unmapped events.
 
 ## Data governance
 
@@ -226,6 +319,47 @@ long format (it also de-identifies, if you need a test fixture — see
 genetically ascertained sex column `f.22001.0.0` (field 22001, instance 0,
 array 0), or the equivalent older-format column `22001-0.0`.
 
+For a real secure-environment run, use
+`scripts/prepare_ukb_for_mapping.R`, not the synthetic test-fixture script.
+The production formatter preserves stable within-environment participant IDs
+and the original person-to-event relationships; it does not sample, shuffle,
+or generate dates. It requires the female and male encodings to be supplied
+explicitly:
+
+```bash
+Rscript scripts/prepare_ukb_for_mapping.R \
+  --input /secure/path/ukb_phenotype_file.tab.gz \
+  --cohort-out /secure/path/cohort.csv.gz \
+  --events-out /secure/path/events.csv.gz \
+  --female-code 0 \
+  --male-code 1
+```
+
+The outputs are gzip-compressed:
+
+```text
+cohort.csv.gz: person_id,sex
+events.csv.gz: person_id,code,vocabulary
+```
+
+The formatter prefers the consolidated inpatient diagnosis fields `41270`
+(ICD10) and `41271` (ICD9). If those fields are absent, it falls back to the
+older main/secondary fields `41202`/`41204` and `41203`/`41205`; it does not
+extract both representations because the consolidated fields incorporate the
+older fields. Cancer-registry and death-registry diagnosis fields `40006`,
+`40013`, `40001`, and `40002` are also included. `41201` (external causes) is
+not included by default because it is a separate external-cause field rather
+than a diagnosis field; add it only with an explicitly reviewed injury/external
+cause analysis. ICD9 events are labelled `ICD9CM`; ICD10 events are labelled `ICD10`.
+Each non-missing value in every selected ICD diagnosis column becomes an event
+row linked to the same `person_id`; whitespace-separated values within a cell
+are split into separate codes. The script does not create event dates, so use
+the mapper's default `--case-rule any-event` unless dates are added through a
+separate approved extraction. Missing sex is retained as missing. Unexpected
+non-missing sex values, blank or duplicate participant IDs, and non-gzip output
+paths cause the script to stop. Keep both outputs inside the secure environment
+and never commit them.
+
 ### `--exclude-phenotypes` (optional, `map-phecodes`)
 
 Drops whole phecodes from **every** output (`phecode_counts`,
@@ -303,6 +437,52 @@ takes precedence over an exclusion.
 - `unmapped_events.csv` — events that didn't match the vocabulary map, for QC
 - `audit.json` — timestamp, case rule, thresholds, exclusion version, unmapped rate, phenotype-matrix summary, and the release's manifest checksum, so a run can always be traced back to the exact release and inputs that produced it
 
+With the standard hierarchy-aware workflow, the corresponding primary files
+have the `_hierarchy` suffix, including
+`phenotype_matrix_hierarchy.csv.gz`, `phenotype_matrix_hierarchy.parquet`,
+`phecode_counts_hierarchy.parquet`, `eligible_phecodes_hierarchy.xlsx`,
+`unmapped_events_hierarchy.csv`, and `hierarchy_fallbacks.csv`. The unsuffixed
+files remain the exact-match compatibility baseline.
+
+### `validate-phecodex` (aggregate cross-biobank QC)
+
+`validate-phecodex` compares a local aggregate mapping run with an exported
+All of Us All by All PhecodeX summary. It is a plausibility check across
+biobanks, not an exact expected-count test. The local run must contain
+`phecode_counts.parquet`, `person_phecodes.parquet`, `unmapped_events.csv`,
+and `audit.json`; the release must contain `phecode_info.parquet` and
+`manifest.json`.
+
+The external CSV or Parquet export must contain exactly these canonical fields:
+
+```text
+phecode,description,sex,ancestry,case_count,control_count,sample_count,source,source_version
+```
+
+`phecode` values must be PhecodeX identifiers such as `EM_202` or `CV_401.1`;
+conventional numeric phecodes such as `250.2` are rejected. The validator
+writes `phecodex_comparison.csv`, `phecodex_review.csv`,
+`prevalence_scatter.svg`, and `validation.json`.
+
+Example:
+
+```bash
+phecodex-map validate-phecodex \
+  --run phecodex_results \
+  --release releases/phecodex-1.1-cm-who-snomed \
+  --external all_by_all_phecodex_summary.csv \
+  --output validation_all_by_all
+```
+
+The All by All phenotype-specific Hail tables are accessed through the All of
+Us Researcher Workbench. Export only aggregate PhecodeX metadata and counts
+with the canonical fields above; do not export participant-level records.
+Record the All by All release, ancestry stratum, sex stratum, and case-count
+threshold in `source_version` or the accompanying provenance. All by All
+applies its own ancestry and minimum-case filters, so denominator and ancestry
+differences are reported for manual review rather than treated as mapper
+failures.
+
 ### `phenotype_matrix`
 
 One row per person in `--cohort`, one column per **retained** phecode (i.e.
@@ -326,6 +506,30 @@ The `--cohort` input must include a `sex` column so sex-restricted
 phenotypes cannot be evaluated without the information needed to identify
 opposite-sex or unknown-sex participants. Sex-restriction is applied only
 when the `--phecodex-info` source provides a valid `sex` value.
+
+### Downsampling attrition figure
+
+To show how many phenotypes remain above the case/control thresholds as the
+cohort is downsampled, run:
+
+```bash
+python scripts/plot_phecode_attrition.py \
+  --cohort cohort.csv.gz \
+  --person-phecodes phecodex_results/person_phecodes.parquet \
+  --output-csv reports/phecode_attrition.csv \
+  --output-svg reports/phecode_attrition.svg \
+  --min-cases 200 \
+  --min-controls 200 \
+  --seed 1
+```
+
+The script uses the same random ordering for every requested sample size and
+reapplies both thresholds after each downsampling step. It uses the mapper's
+any-event case table and calculates controls as sampled people who are not
+cases. Consequently, the figure is an attrition QC visualization; it does not
+reproduce control exclusions or sex-specific denominators. The output SVG can
+be included directly in this README after running it on an approved aggregate
+or test fixture.
 
 Because this is a dense matrix, its size scales with cohort size × number
 of retained phecodes. Verified end-to-end against the real UK Biobank-scale

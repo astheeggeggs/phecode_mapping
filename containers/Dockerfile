@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PHECODEX_HOME=/opt/phecodex
+
+WORKDIR ${PHECODEX_HOME}
+
+COPY requirements-lock.txt pyproject.toml README.md ANALYST_GUIDE.md ./
+COPY src ./src
+COPY scripts/verify_release.py scripts/verify_release.py
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements-lock.txt \
+    && python -m pip install --no-cache-dir . \
+    && python -m pip cache purge
+
+ENTRYPOINT ["phecodex-map"]
+CMD ["--help"]

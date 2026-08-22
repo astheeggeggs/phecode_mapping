@@ -10,3 +10,13 @@ __pycache__/
 athena/
 scratchpad_ukb/
 *deid*.csv
+
+# Local source downloads, generated releases, reports, and cohort runs. The
+# shareable distribution archive under distributions/ is tracked separately.
+hierarchy_sources/
+releases/
+runs/
+reports/
+phecodex_results_*/
+phecodeX_*.csv
+phecodeX_*_manifest.json

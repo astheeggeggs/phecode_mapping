@@ -88,8 +88,8 @@ extract_ID_and_ICD_UKB <- function(
 	dt_header <- fread(phenotype_file, na.strings=NULL, nrow=1)
 	id_col <- if ("eid" %in% names(dt_header)) "eid" else "f.eid"
 
-	ICD10s <- c("41202", "41204", "40006", "40001", "40002")
-	ICD9s <- c("41203", "41205", "40013")
+	ICD10s <- if (length(get_cols("41270", dt_header))) c("41270", "40006", "40001", "40002") else c("41202", "41204", "40006", "40001", "40002")
+	ICD9s <- if (length(get_cols("41271", dt_header))) c("41271", "40013") else c("41203", "41205", "40013")
 
 	sex_candidates <- if (is.null(sex_column)) c("f.22001.0.0", "22001-0.0") else sex_column
 	sex_cols <- intersect(sex_candidates, names(dt_header))

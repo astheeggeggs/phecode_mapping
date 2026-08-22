@@ -1,0 +1,16 @@
+.git
+.venv
+athena
+releases
+distributions
+scratchpad_ukb
+phecodex_results_200k
+runs
+reports
+hierarchy_sources
+*.parquet
+*.csv
+*.csv.gz
+*.xlsx
+*.tar.gz
+*.sha256
