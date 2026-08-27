@@ -199,7 +199,7 @@ def _load_excluded_phecodes(con, release: Path, exclude_phenotypes: Path | None)
     }
 
 
-def _load_phecode_sex(con, release: Path) -> None:
+def _load_phecode_sex(con, release: Path) -> dict:
     """Build `phecode_sex` (only genuinely restricted phecodes) and `cohort_sex_counts`.
 
     A person is *evaluable* for a phecode when the phecode carries no sex
@@ -210,9 +210,17 @@ def _load_phecode_sex(con, release: Path) -> None:
     """
     con.execute("CREATE TABLE phecode_sex(phecode VARCHAR, restrict_sex VARCHAR)")
     info_path = release / "phecode_info.parquet"
+    # Whether the RELEASE carries sex metadata at all. A release built without
+    # --phecodex-info (or from the upstream phecodeX_info.csv, which has no `sex`
+    # column) leaves phecode_sex empty, EVALUABLE degenerates to TRUE for everyone,
+    # and every sex-specific phecode is silently scored against the whole cohort --
+    # exactly the defect the sex fix was written to remove. Report it so the caller
+    # can say so out loud rather than discovering it in the effect estimates.
+    release_has_sex = False
     if info_path.exists():
         info_view = f"read_parquet('{quote(info_path)}')"
         if {"phecode", "sex"} <= _columns(con, info_view):
+            release_has_sex = True
             con.execute(f"""
               INSERT INTO phecode_sex
               SELECT phecode, upper(trim(sex)) FROM {info_view}
@@ -225,6 +233,18 @@ def _load_phecode_sex(con, release: Path) -> None:
              count(*) FILTER (WHERE sex = 'FEMALE') AS n_female
       FROM cohort
     """)
+    n_all, n_male, n_female = con.execute(
+        "SELECT n_all, n_male, n_female FROM cohort_sex_counts").fetchone()
+    return {
+        "release_has_sex_metadata": release_has_sex,
+        "n_restricted_phecodes": con.execute("SELECT count(*) FROM phecode_sex").fetchone()[0],
+        "n_male": n_male, "n_female": n_female,
+        # Neither MALE nor FEMALE: blank, NULL, or an unrecognised encoding. These
+        # people are correctly non-evaluable for every sex-restricted phecode, but
+        # without this number a case count deflated by the unknown-sex fraction is
+        # indistinguishable from a genuinely rare phenotype.
+        "n_unknown_sex": n_all - n_male - n_female,
+    }
 
 
 # A person counts toward a phecode only if the phecode is unrestricted or their sex matches.
@@ -374,8 +394,9 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     validate_cohort_and_events(con, cohort_src, event_src)
     # validate_cohort_and_events guarantees person_id/sex on the cohort and
     # person_id/code/vocabulary on the events, so the duplicate column checks that
-    # used to sit here (with their own divergent wording) are gone.
-    has_sex = True
+    # used to sit here (with their own divergent wording) are gone. The `sex` column
+    # is therefore always present; whether it holds any USABLE values is a separate
+    # question, answered after _load_phecode_sex below.
     if case_rule == "two-dates" and "event_date" not in _columns(con, event_src): raise ValueError("two-dates requires event_date")
     if case_rule == "two-dates":
         # try_cast returns NULL for a non-ISO date rather than failing, and the
@@ -398,7 +419,11 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     invalid = con.execute("SELECT count(*) FROM cohort_input WHERE person_id IS NULL").fetchone()[0]
     duplicate = con.execute("SELECT count(*) - count(DISTINCT person_id) FROM cohort_input").fetchone()[0]
     if invalid or duplicate: raise ValueError("Cohort person_id must be non-null and unique")
-    sex_expression = "upper(trim(sex))" if has_sex else "CAST(NULL AS VARCHAR)"
+    # The column is guaranteed present by validate_cohort_and_events; blank/NULL/
+    # unrecognised values normalise to something outside ('MALE','FEMALE') and are
+    # counted as n_unknown_sex, which is what makes them non-evaluable rather than
+    # silently evaluable.
+    sex_expression = "upper(trim(sex))"
     # Cast person_id to VARCHAR on both sides so the join does not depend on DuckDB's
     # type coercion, which resolved differently in different joins of the same run.
     con.execute(f"CREATE TABLE cohort AS SELECT CAST(person_id AS VARCHAR) AS person_id, {sex_expression} AS sex FROM cohort_input")
@@ -429,7 +454,27 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
       WHERE normalized_code IS NULL OR NOT EXISTS (SELECT 1 FROM mapped_events m WHERE m.event_id=e.event_id)
     """)
     exclusion_summary = _load_excluded_phecodes(con, release, exclude_phenotypes)
-    _load_phecode_sex(con, release)
+    sex_summary = _load_phecode_sex(con, release)
+    # has_sex is DERIVED, never asserted. It was previously a hardwired True, which
+    # made both audit fields below constants and the warning branch unreachable --
+    # so the two signals designed to flag a broken sex configuration could not fire.
+    has_sex = (sex_summary["n_male"] + sex_summary["n_female"]) > 0
+    if sex_summary["n_restricted_phecodes"] and not has_sex:
+        # Every sex-restricted phecode would score 0 cases and 0 controls, drop out
+        # of the matrix entirely, and leave no trace in stdout or the audit. Refuse
+        # rather than emit a matrix that is silently missing 322 phenotypes.
+        raise ValueError(
+            f"cohort has no usable sex values ({sex_summary['n_unknown_sex']} of "
+            f"{sex_summary['n_unknown_sex']} rows are blank, NULL or unrecognised), but the release "
+            f"restricts {sex_summary['n_restricted_phecodes']} phecode(s) by sex. Every one of them "
+            "would be scored as 0 cases / 0 controls and silently dropped from the phenotype matrix. "
+            "Expected 'Male'/'Female' (case-insensitive). Fix the cohort sex column, or use a release "
+            "without sex metadata if you genuinely intend every phecode to be unrestricted.")
+    if not sex_summary["release_has_sex_metadata"]:
+        print("phecodex-map: warning: the release's phecode_info has no 'sex' column, so NO phecode is "
+              "sex-restricted and every sex-specific phenotype will be scored against the whole cohort. "
+              "Rebuild the release with --phecodex-info <file with a sex column> to restore sex "
+              "restrictions. Recorded as release_has_sex_metadata=false in audit.json.", file=sys.stderr)
     con.execute("CREATE TABLE exclusions(person_id VARCHAR, phecode VARCHAR)")
     con.execute("CREATE TABLE exclusions_input(phecode VARCHAR, exclusion_type VARCHAR, exclusion_value VARCHAR, vocabulary VARCHAR)")
     exclusion_version = None
@@ -487,6 +532,11 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
              "exclude_phenotypes": None if not exclude_phenotypes else {"file": str(exclude_phenotypes), **exclusion_summary},
              "events": total, "unmapped_events": unmapped, "unmapped_rate": rate,
              "mapping_policy": "exact-match-against-published-map",
+             # Every field here is derived. release_has_sex_metadata=false means NO
+             # phecode was sex-restricted; n_unknown_sex is the count of people who
+             # are non-evaluable for every restricted phecode, without which a
+             # deflated case count is indistinguishable from a rare phenotype.
+             "sex": sex_summary,
              "release_manifest_sha256": checksum(release / "manifest.json"),
              "phenotype_matrix": matrix_info}
     (output / "audit.json").write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n")
@@ -600,7 +650,10 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
     con.execute(f"COPY phenotype_matrix TO '{quote(output / (output_stem + '.csv.gz'))}' (HEADER, DELIMITER ',', COMPRESSION 'gzip')")
     return {
         "n_columns": len(retained_phecodes),
-        "cohort_has_sex_column": has_sex,
+        # Derived from cohort_sex_counts by the caller, not hardwired. When this is
+        # false the run carries sex-restricted phecodes it cannot evaluate, and the
+        # field below is non-zero rather than a constant 0.
+        "cohort_has_usable_sex": has_sex,
         "sex_restricted_retained_phecodes": len(sex_restricted_retained),
         "sex_restricted_phecodes_treated_as_unrestricted": 0 if has_sex else len(sex_restricted_retained),
     }

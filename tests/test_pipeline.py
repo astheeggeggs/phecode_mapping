@@ -94,8 +94,13 @@ def test_phenotype_matrix_sex_restriction_and_exclusions(tmp_path: Path) -> None
     assert rows["p4"] == 0  # ordinary control
 
     audit = json.loads((output / "audit.json").read_text())
-    assert audit["phenotype_matrix"]["cohort_has_sex_column"] is True
+    # Renamed from cohort_has_sex_column, which was hardwired True and so asserted
+    # nothing; this value is now derived from cohort_sex_counts.
+    assert audit["phenotype_matrix"]["cohort_has_usable_sex"] is True
     assert audit["phenotype_matrix"]["sex_restricted_retained_phecodes"] == 1
+    assert audit["sex"]["release_has_sex_metadata"] is True
+    assert audit["sex"]["n_unknown_sex"] == 0
+    assert audit["sex"]["n_male"] + audit["sex"]["n_female"] == 4
 
 
 def test_exclude_phenotypes_drops_whole_phecodes_from_every_output(tmp_path: Path) -> None:
