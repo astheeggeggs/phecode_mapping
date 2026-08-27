@@ -80,8 +80,13 @@ def test_cli_run_applies_the_bundled_default_exclusions(tmp_path: Path, full_rel
     import json
     audit = json.loads((output / "audit.json").read_text())
     assert audit["exclude_phenotypes"]["file"] == str(cli.DEFAULT_EXCLUSIONS)
-    # 4 = SS_004 resolved from the 'Symptoms' category rule, plus the three
-    # phecode-type rules (PP_P001-P003), which are recorded whether or not this
-    # release contains them. The audit counts excluded *identifiers*, not the
-    # number of the release's phecodes that were actually dropped.
-    assert audit["exclude_phenotypes"]["phecodes_excluded"] == 4
+    # 1 = SS_004, resolved from the 'Symptoms' category rule, and the only phecode
+    # in this fixture release that any rule actually names. This asserted 4 until
+    # the audit pointed out that counting the three PP_P00x rules the release does
+    # not contain reports phenotypes as dropped that were never dropped -- worse
+    # than silence, because it reads as confirmation the rules worked. The earlier
+    # comment here rationalised that as "counting identifiers, not phecodes"; the
+    # field is named phecodes_excluded and an analyst reads it as phecodes.
+    assert audit["exclude_phenotypes"]["phecodes_excluded"] == 1
+    assert audit["exclude_phenotypes"]["unmatched_phecode_rules"] == ["PP_P001", "PP_P002", "PP_P003"]
+    assert set(audit["exclude_phenotypes"]["unmatched_category_rules"]) == {"Infections", "Neonatal"}

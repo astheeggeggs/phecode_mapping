@@ -232,9 +232,29 @@ def _load_excluded_phecodes(con, release: Path, exclude_phenotypes: Path | None)
             print(f"phecodex-map: warning: --exclude-phenotypes category rule(s) matched no phecode in this "
                   f"release: {unmatched}. Check them against the release's phecode_info 'category' values.",
                   file=sys.stderr)
+    # The same check for 'phecode' rules, which had none. A rule naming a phecode the
+    # release does not contain -- a typo, or the right identifier in the wrong case --
+    # was inserted into excluded_phecodes regardless, excluding nothing while inflating
+    # phecodes_excluded. The audit then reported phenotypes as dropped that were never
+    # dropped, which is worse than silence: it reads as confirmation the rule worked.
+    known = "SELECT phecode FROM icd_map UNION SELECT phecode FROM excluded_phecodes WHERE FALSE"
+    if info_view:
+        known += f" UNION SELECT phecode FROM {info_view}"
+    unmatched_phecodes = sorted(r[0] for r in con.execute(f"""
+      SELECT DISTINCT x.match_value FROM exclude_phenotypes_input x
+      WHERE x.match_type = 'phecode' AND x.match_value NOT IN ({known})
+    """).fetchall())
+    if unmatched_phecodes:
+        print(f"phecodex-map: warning: --exclude-phenotypes phecode rule(s) name no phecode in this release: "
+              f"{unmatched_phecodes}. Matching is case-sensitive; check them against the release's phecodes.",
+              file=sys.stderr)
     return {
-        "phecodes_excluded": con.execute("SELECT count(*) FROM excluded_phecodes").fetchone()[0],
+        # Counts phecodes the release actually has, not rules supplied. Previously a
+        # rule naming nothing still incremented this.
+        "phecodes_excluded": con.execute(
+            f"SELECT count(*) FROM excluded_phecodes WHERE phecode IN ({known})").fetchone()[0],
         "unmatched_category_rules": unmatched,
+        "unmatched_phecode_rules": unmatched_phecodes,
     }
 
 

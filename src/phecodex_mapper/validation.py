@@ -88,6 +88,13 @@ def validate_phecodex_counts(run: Path, release: Path, external: Path, output: P
         raise ValueError("audit.json is missing release_manifest_sha256")
     if audit["release_manifest_sha256"] != checksum(release / "manifest.json"):
         raise ValueError("audit.json release_manifest_sha256 does not match the release manifest")
+    # Whether the run's own denominators respect sex restrictions, read from the run
+    # rather than assumed. A run against a release with no sex metadata scored every
+    # sex-specific phecode against the whole cohort, and a reviewer comparing it to a
+    # sex-stratified external result needs to know. Runs predating the `sex` audit
+    # block cannot say, so they are treated as sex-aware -- the same assumption the
+    # rest of this comparison already makes about them.
+    local_denominator_is_sex_aware = audit.get("sex", {}).get("release_has_sex_metadata", True)
 
     info_columns = _columns(con, info_src)
     if not {"phecode", "sex"}.issubset(info_columns):
@@ -147,7 +154,14 @@ def validate_phecodex_counts(run: Path, release: Path, external: Path, output: P
             reasons, notes = [], []
             if str(local_sex or "Both").upper() != str(sex or "Both").upper(): reasons.append("sex_stratum_mismatch")
             if ancestry not in (None, "", "ALL", "META"): reasons.append("cross_biobank_ancestry_stratum")
-            if local_sex and str(local_sex).upper() != "BOTH": notes.append("local_sex_denominator_not_available")
+            # Was stamped on EVERY sex-restricted row, describing the pre-S1 behaviour
+            # in which the local denominator ignored sex. Since the denominator became
+            # sex-aware the note was simply false, and it told a reviewer to discount
+            # exactly the rows that had become trustworthy. It now fires only when the
+            # local denominator genuinely is not sex-restricted -- which happens when
+            # the release carried no sex metadata, so no phecode was restricted at all.
+            if local_sex and str(local_sex).upper() != "BOTH" and not local_denominator_is_sex_aware:
+                notes.append("local_denominator_not_sex_restricted")
             if ls != sample: notes.append("denominator_mismatch")
             abs_diff = None if lp is None or proportion is None else abs(lp - proportion)
             rel_diff = None if abs_diff is None or not proportion else abs_diff / proportion
