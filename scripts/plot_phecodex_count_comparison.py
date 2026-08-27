@@ -69,7 +69,7 @@ def main() -> None:
         parts.append(f'<text x="{x+6:.1f}" y="{y-6:.1f}" font-family="sans-serif" font-size="11" fill="#111827">{esc(code)}</text>')
     parts += [f'<line x1="{left}" y1="{height-bottom}" x2="{width-right}" y2="{height-bottom}" stroke="#111827"/>',
               f'<line x1="{left}" y1="{top}" x2="{left}" y2="{height-bottom}" stroke="#111827"/>',
-              f'<text x="{width/2}" y="{height-25}" text-anchor="middle" font-family="sans-serif" font-size="15">Local hierarchy-aware case count (log scale)</text>',
+              f'<text x="{width/2}" y="{height-25}" text-anchor="middle" font-family="sans-serif" font-size="15">Local case count (log scale)</text>',
               f'<text x="20" y="{height/2}" transform="rotate(-90 20 {height/2})" text-anchor="middle" font-family="sans-serif" font-size="15">All by All case count (log scale)</text>',
               '</svg>']
     args.output.parent.mkdir(parents=True, exist_ok=True)

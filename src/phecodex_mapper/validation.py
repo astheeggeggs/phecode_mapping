@@ -9,7 +9,13 @@ import duckdb
 
 from .io import checksum, connect, quote, relation_for
 
-PHECODEX_RE = re.compile(r"^[A-Z]{2}_[0-9]+(?:\.[0-9]+)?$")
+# PhecodeX identifiers are a two-letter category prefix, an underscore, a body of
+# three digits optionally preceded by a letter (NB_N000, PP_P001), and an optional
+# numeric suffix. Requiring the body to be purely numeric rejected 14 genuine
+# PhecodeX 1.1 codes -- all of the NB_N* and PP_P00* series -- which aborted the
+# command against any real All by All export. Verified against all 3,690 codes in
+# phecodeX_info_1.1_with_sex.csv; still rejects conventional phecodes like "250.2".
+PHECODEX_RE = re.compile(r"^[A-Z]{2}_[A-Z0-9]+(?:\.[0-9]+)?$")
 REQUIRED_EXTERNAL = {
     "phecode", "description", "sex", "ancestry", "case_count",
     "control_count", "sample_count", "source", "source_version",
@@ -53,19 +59,18 @@ def _validate_phecodex_ids(values: list[str], label: str) -> None:
         raise ValueError(f"{label} contains non-PhecodeX identifiers, e.g. {bad[:5]}")
 
 
-def validate_phecodex_counts(run: Path, release: Path, external: Path, output: Path, hierarchy_aware: bool = False) -> None:
+def validate_phecodex_counts(run: Path, release: Path, external: Path, output: Path) -> None:
     if output.exists():
         raise FileExistsError(f"Output directory already exists: {output}")
-    suffix = "_hierarchy" if hierarchy_aware else ""
-    required_local = [run / f"phecode_counts{suffix}.parquet", run / f"person_phecodes{suffix}.parquet", run / "audit.json", run / f"unmapped_events{suffix}.csv"]
+    required_local = [run / "phecode_counts.parquet", run / f"person_phecodes.parquet", run / "audit.json", run / f"unmapped_events.csv"]
     required_release = [release / "phecode_info.parquet", release / "manifest.json"]
     missing = [str(p) for p in required_local + required_release if not p.exists()]
     if missing:
         raise FileNotFoundError(f"Validation inputs missing: {missing}")
 
     con = connect()
-    local_src = relation_for(run / f"phecode_counts{suffix}.parquet")
-    person_src = relation_for(run / f"person_phecodes{suffix}.parquet")
+    local_src = relation_for(run / "phecode_counts.parquet")
+    person_src = relation_for(run / f"person_phecodes.parquet")
     info_src = relation_for(release / "phecode_info.parquet")
     external_src = relation_for(external)
     external_columns = _columns(con, external_src)
@@ -117,24 +122,39 @@ def validate_phecodex_counts(run: Path, release: Path, external: Path, output: P
                source, source_version
         FROM {external_src}
     """).fetchall()
-    headers = ["phecode", "description_local", "description_external", "sex_local", "sex_external", "ancestry", "local_case_count", "external_case_count", "local_control_count", "external_control_count", "local_sample_count", "external_sample_count", "local_case_proportion", "external_case_proportion", "absolute_proportion_difference", "relative_proportion_difference", "denominator_difference", "source", "source_version", "review_reason"]
+    headers = ["phecode", "description_local", "description_external", "sex_local", "sex_external", "ancestry",
+               "local_case_count", "external_case_count",
+               "local_control_count_before_exclusions", "local_control_count_after_exclusions",
+               "local_excluded_control_count", "external_control_count",
+               "local_sample_count", "external_sample_count", "local_case_proportion", "external_case_proportion",
+               "absolute_proportion_difference", "relative_proportion_difference", "denominator_difference",
+               "source", "source_version", "review_reason", "notes"]
     comparison: list[dict] = []
     for row in external:
         phecode, description, sex, ancestry, cases, controls, sample, proportion, source, version = row
         l = local_by_id.get(phecode)
         if l is None:
-            reason = "missing_local_phecode"
-            values = [phecode, "", description, "", sex, ancestry, None, cases, None, controls, None, sample, None, proportion, None, None, None, source, version, reason]
+            values = [phecode, "", description, "", sex, ancestry, None, cases, None, None, None, controls,
+                      None, sample, None, proportion, None, None, None, source, version,
+                      "missing_local_phecode", ""]
         else:
             local_description, local_sex, lc, lcb, lca, excluded, ls, lp = l[1:]
-            reasons = []
+            # review_reason drives the review file, so it must contain only things a
+            # human should act on. A differing denominator is *always* true between two
+            # different biobanks, so treating it as a review reason made every row a
+            # review row and the triage file a copy of the full comparison. It is
+            # recorded as a note, alongside the denominator_difference column.
+            reasons, notes = [], []
             if str(local_sex or "Both").upper() != str(sex or "Both").upper(): reasons.append("sex_stratum_mismatch")
             if ancestry not in (None, "", "ALL", "META"): reasons.append("cross_biobank_ancestry_stratum")
-            if ls != sample: reasons.append("denominator_mismatch")
-            if local_sex and str(local_sex).upper() != "BOTH": reasons.append("local_sex_denominator_not_available")
+            if local_sex and str(local_sex).upper() != "BOTH": notes.append("local_sex_denominator_not_available")
+            if ls != sample: notes.append("denominator_mismatch")
             abs_diff = None if lp is None or proportion is None else abs(lp - proportion)
-            rel_diff = None if abs_diff is None or proportion == 0 else abs_diff / proportion
-            values = [phecode, local_description or "", description, local_sex, sex, ancestry, lc, cases, lcb, controls, ls, sample, lp, proportion, abs_diff, rel_diff, ls - sample if ls is not None and sample is not None else None, source, version, ";".join(reasons)]
+            rel_diff = None if abs_diff is None or not proportion else abs_diff / proportion
+            values = [phecode, local_description or "", description, local_sex, sex, ancestry, lc, cases,
+                      lcb, lca, excluded, controls, ls, sample, lp, proportion, abs_diff, rel_diff,
+                      ls - sample if ls is not None and sample is not None else None,
+                      source, version, ";".join(reasons), ";".join(notes)]
         comparison.append(dict(zip(headers, values)))
     comparison.sort(key=lambda r: (r["absolute_proportion_difference"] is None, -(r["absolute_proportion_difference"] or 0)))
     output.mkdir(parents=True)
@@ -143,7 +163,7 @@ def validate_phecodex_counts(run: Path, release: Path, external: Path, output: P
     _write_csv(output / "phecodex_review.csv", headers, [tuple(r[h] for h in headers) for r in review])
     _write_svg(output / "prevalence_scatter.svg", comparison)
 
-    unmapped_src = relation_for(run / f"unmapped_events{suffix}.csv")
+    unmapped_src = relation_for(run / f"unmapped_events.csv")
     vocab_rates = con.execute(f"SELECT vocabulary, count(*) FROM {unmapped_src} GROUP BY vocabulary ORDER BY vocabulary").fetchall()
     local_ids_set, external_ids_set = set(local_ids), set(external_ids)
     qc = {
@@ -156,7 +176,7 @@ def validate_phecodex_counts(run: Path, release: Path, external: Path, output: P
         "unmapped_events_by_vocabulary": {str(k): v for k, v in vocab_rates},
         "sex_specific_denominator_note": "The aggregate local outputs do not contain cohort sex totals; sex-specific local denominator comparisons are flagged rather than inferred.",
         "local_audit": audit,
-        "local_mapping_variant": "hierarchy-aware" if hierarchy_aware else "exact",
+        "local_mapping_policy": "exact-match-against-published-map",
         "release_manifest_sha256": checksum(release / "manifest.json"),
         "external_source_versions": sorted({str(r[9]) for r in external}),
         "review_rows": len(review),

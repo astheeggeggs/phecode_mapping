@@ -19,8 +19,7 @@ Verify the shared release:
 
 ```bash
 .venv/bin/python scripts/verify_release.py \
-  --release release \
-  --hierarchy-aware
+  --release release
 ```
 
 ## Required inputs
@@ -51,7 +50,7 @@ Validate inputs without processing them:
   --output phecodex_run --preflight-only
 ```
 
-Run the standard hierarchy-aware policy:
+Run the mapper:
 
 ```bash
 .venv/bin/phecodex-map run \
@@ -62,15 +61,14 @@ Run the standard hierarchy-aware policy:
 The primary RVAS input is:
 
 ```text
-phenotype_matrix_hierarchy.csv.gz
+phenotype_matrix.csv.gz
 ```
 
 It contains `person_id` plus one column per retained PhecodeX trait. Values
 are `1` for cases, `0` for ordinary controls, and blank for non-evaluable
 people. Keep all person-level files secure. Use `audit.json`,
-`phecode_counts_hierarchy.parquet`, and `hierarchy_fallbacks.csv` for QC.
+`phecode_counts.parquet`, and `unmapped_events.csv` for QC.
 
-Use `--exact-only` only when reproducing the exact-match compatibility baseline.
 The standard `run` command automatically applies the bundled recommended
 exclusions for Symptoms, Neonatal, Infections, and three administrative
 pregnancy-encounter phecodes. Supply `--exclude-phenotypes <file>` to replace

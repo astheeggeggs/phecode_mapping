@@ -6,8 +6,9 @@ Mapping is performed locally at each biobank; participant-level data does not
 need to leave the secure environment.
 
 The recommended analyst path is the high-level `run` command. It validates the
-inputs, uses the approved hierarchy-aware ICD policy, applies sex restrictions
-and thresholds, and records checksums and configuration in `audit.json`.
+inputs, maps events by exact match against the published PhecodeX map, applies
+sex restrictions and thresholds, and records checksums and configuration in
+`audit.json`.
 
 For detailed release-building, UK Biobank preparation, validation, and
 container instructions, see [ANALYST_GUIDE.md](ANALYST_GUIDE.md).
@@ -31,15 +32,14 @@ Verify the supplied release before use:
 
 ```bash
 .venv/bin/python scripts/verify_release.py \
-  --release releases/phecodex-1.1-hierarchy \
-  --hierarchy-aware
+  --release releases/phecodex-1.1
 ```
 
 Validate inputs without mapping:
 
 ```bash
 .venv/bin/phecodex-map run \
-  --release releases/phecodex-1.1-hierarchy \
+  --release releases/phecodex-1.1 \
   --cohort cohort.csv \
   --events events.csv \
   --output phecodex_run \
@@ -50,14 +50,13 @@ Run the mapper:
 
 ```bash
 .venv/bin/phecodex-map run \
-  --release releases/phecodex-1.1-hierarchy \
+  --release releases/phecodex-1.1 \
   --cohort cohort.csv \
   --events events.csv \
   --output phecodex_run
 ```
 
-The command refuses to overwrite an existing output directory. Use
-`--exact-only` when reproducing the exact-match compatibility baseline.
+The command refuses to overwrite an existing output directory.
 The standard workflow automatically applies the bundled recommended phenotype
 exclusions for `Symptoms`, `Neonatal`, `Infections`, and three administrative
 pregnancy-encounter phecodes. Supply `--exclude-phenotypes <file>` to use a
@@ -67,7 +66,7 @@ To specify the bundled policy explicitly:
 
 ```bash
 .venv/bin/phecodex-map run \
-  --release releases/phecodex-1.1-hierarchy \
+  --release releases/phecodex-1.1 \
   --cohort cohort.csv \
   --events events.csv \
   --exclude-phenotypes src/phecodex_mapper/data/recommended_exclusions.csv \
@@ -92,7 +91,16 @@ person_id,code,vocabulary,event_date
 ```
 
 `event_date` is optional for the default `any-event` rule, but required for
-`--case-rule two-dates`. Supported vocabularies are `ICD9CM`, `ICD10`,
+`--case-rule two-dates`, which additionally requires every date to be ISO
+`YYYY-MM-DD`; a run refuses to start otherwise rather than silently treating
+unparseable dates as absent.
+
+Under `two-dates`, a person carrying a phecode on only one date is neither a case
+nor a control: they are non-evaluable (blank in the matrix), because a single code
+is ambiguous evidence rather than evidence of absence. `phecode_counts` reports
+them as `subthreshold_control_count`. This follows PheTK, whose control set
+excludes everyone with any occurrence of the phecode regardless of count. The
+default `any-event` rule is unaffected, since one event already makes a case. Supported vocabularies are `ICD9CM`, `ICD10`,
 `ICD10CM`, and `SNOMED`. Codes are normalized before matching. Events for
 people absent from the cohort are reported during preflight.
 
@@ -103,16 +111,15 @@ writes compressed cohort and event files. Do not commit its outputs.
 
 ## Outputs
 
-The standard hierarchy-aware run produces:
+A run produces:
 
 ```text
-phenotype_matrix_hierarchy.csv.gz
-phenotype_matrix_hierarchy.parquet
-phecode_counts_hierarchy.parquet
-eligible_phecodes_hierarchy.xlsx
+phenotype_matrix.csv.gz
+phenotype_matrix.parquet
+phecode_counts.parquet
+eligible_phecodes.xlsx
 audit.json
-unmapped_events_hierarchy.csv
-hierarchy_fallbacks.csv
+unmapped_events.csv
 ```
 
 The matrix has one row per cohort person, a stable `person_id` column, and one
@@ -125,28 +132,26 @@ environment. Share aggregate counts and `audit.json` only where permitted.
 The audit records release and input checksums, row and vocabulary counts,
 mapping mode, thresholds, sex handling, and unmapped-event rates.
 
-## Mapping policies
+## Mapping policy
 
-Exact matching is always retained as the compatibility baseline. In the
-default hierarchy-aware policy, an event first attempts an exact match. If
-that fails, it may inherit mappings from the most specific explicitly
-validated parent in the same vocabulary. No string-prefix inference or
-cross-vocabulary fallback is used. SNOMED is outside the ICD hierarchy logic.
+An event maps to a phecode only when its normalized code appears in the release's
+PhecodeX map for that vocabulary. There is no inference from parent codes, no
+string-prefix matching, and no cross-vocabulary fallback.
 
-Hierarchy-aware releases contain `icd_hierarchy.parquet` and record reference
-checksums and source versions in `manifest.json`. Review
-`hierarchy_fallbacks.csv` and compare exact versus hierarchy-aware counts:
+This is deliberate. The published PhecodeX map is already unrolled to leaf level
+wherever a phecode is assigned, so a code's absence from it is a curation decision
+rather than a gap to be filled. The unmapped branches are dominated by trauma
+sequelae, iatrogenic complications and status codes whose mapped ancestors are
+disease phenotypes — inferring them from a parent would assign, for example,
+"retained intraocular foreign body" to "Disorders of globe". Mapping exactly means
+every site reproduces the same result from the same published vocabulary, and a
+reviewer can check the mapping against
+[the PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary).
 
-```bash
-python scripts/compare_exact_hierarchy.py \
-  --run phecodex_run \
-  --output phecodex_run_hierarchy_comparison
-```
-
-The official unrolled PhecodeX map expands phecodes to mapped descendant ICD
-codes; it does not authorize inferring every unmapped descendant from a
-parent. Hierarchy-aware mapping therefore requires a separate, versioned
-parent-child reference for `ICD9CM`, `ICD10`, and `ICD10CM`.
+Where the published map genuinely lags the current ICD release, the remedy is a
+curated, versioned supplement to the map — explicit and auditable — rather than
+run-time inference. Codes with no entry are reported in `unmapped_events.csv`;
+review that file rather than assuming a low unmapped rate means good coverage.
 
 ## Quality control
 
@@ -155,10 +160,10 @@ At minimum, check:
 1. the release checksum and mapper version in `audit.json`;
 2. cohort/event row counts and vocabulary counts from preflight;
 3. unmapped rates separately for each vocabulary;
-4. exact versus hierarchy-aware fallback counts;
-5. high-frequency rows in `hierarchy_fallbacks.csv`;
-6. retained phenotype counts and sex-specific phenotype handling;
-7. that excluded categories are absent from the retained phenotype list.
+4. high-frequency codes in `unmapped_events.csv`, which indicate either a stale
+   map or a vocabulary the release does not cover;
+5. retained phenotype counts and sex-specific phenotype handling;
+6. that excluded categories are absent from the retained phenotype list.
 
 For aggregate cross-biobank plausibility checks, export only aggregate
 PhecodeX counts from an authorized source such as the All by All public
@@ -173,10 +178,9 @@ Run it with:
 ```bash
 .venv/bin/phecodex-map validate-phecodex \
   --run phecodex_run \
-  --release releases/phecodex-1.1-hierarchy \
+  --release releases/phecodex-1.1 \
   --external all_by_all_phecodex_summary.csv \
-  --output validation_all_by_all \
-  --hierarchy-aware
+  --output validation_all_by_all
 ```
 
 This is a plausibility comparison, not an exact expected-count test. The
@@ -193,25 +197,20 @@ UMLS/SNOMED source files, raw download archives, or credentials.
 The shared analyst distribution is intended to contain the mapper, an ICD-only
 release, its manifest/checksum, documentation, and synthetic fixtures. Keep
 licensed vocabulary sources at the site that built the release. The repository
-is configured to ignore local releases, hierarchy sources, Athena files, and
-generated outputs.
+is configured to ignore local releases, Athena files, and generated outputs.
 
 ## Advanced release building
 
 Consortium maintainers can build a release from official PhecodeX files with
 `build-vocabulary`. The command accepts repeated `--phecodex-map` arguments,
-preserving separate `ICD10` and `ICD10CM` aliases. Hierarchy references are
-provided as `VOCABULARY:path`:
+preserving separate `ICD10` and `ICD10CM` aliases:
 
 ```bash
 phecodex-map build-vocabulary \
   --phecodex-map phecodeX_unrolled_ICD_CM.csv \
   --phecodex-map phecodeX_unrolled_ICD_WHO.csv \
   --phecodex-info phecodeX_info_1.1_with_sex.csv \
-  --icd-hierarchy ICD9CM:/secure/refs/icd9cm_hierarchy.csv \
-  --icd-hierarchy ICD10:/secure/refs/icd10_hierarchy.csv \
-  --icd-hierarchy ICD10CM:/secure/refs/icd10cm_hierarchy.csv \
-  --output releases/phecodex-1.1-hierarchy
+  --output releases/phecodex-1.1
 ```
 
 Use the official [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary)

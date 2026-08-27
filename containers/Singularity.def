@@ -8,6 +8,7 @@ From: python:3.11-slim
     ANALYST_GUIDE.md /opt/phecodex/ANALYST_GUIDE.md
     src /opt/phecodex/src
     scripts/verify_release.py /opt/phecodex/scripts/verify_release.py
+    scripts/prepare_ukb_for_mapping.R /opt/phecodex/scripts/prepare_ukb_for_mapping.R
 
 %post
     cd /opt/phecodex

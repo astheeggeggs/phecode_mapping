@@ -30,7 +30,9 @@ def test_counts_before_and_after_exclusion_and_thresholds(tmp_path: Path, releas
     output = tmp_path / "run"
     map_phecodes(release, cohort, events, output, exclusions=exclusions)
     row = duckdb.sql(f"SELECT * FROM read_parquet('{output / 'phecode_counts.parquet'}') WHERE phecode='AA_1'").fetchone()
-    assert row[1:] == (200, 1, 1, 0, False)
+    # case, control_before, excluded, subthreshold, control_after, retained.
+    # subthreshold is 0 under the default any-event rule: one event already makes a case.
+    assert row[1:] == (200, 1, 1, 0, 0, False)
     audit = json.loads((output / "audit.json").read_text())
     assert audit["exclusion_version"] == "v1"
 
@@ -45,9 +47,13 @@ def test_two_dates_and_case_precedence(tmp_path: Path, release: Path) -> None:
     write_csv(exclusions, ["phecode", "exclusion_type", "exclusion_value", "vocabulary"], [["AA_1.1", "phecode", "AA_1.1", "ICD9CM"]])
     output = tmp_path / "run"
     map_phecodes(release, cohort, events, output, case_rule="two-dates", exclusions=exclusions, min_cases=1, min_controls=1)
-    rows = duckdb.sql(f"SELECT phecode, case_count, control_count_before_exclusions, excluded_control_count, control_count_after_exclusions FROM read_parquet('{output / 'phecode_counts.parquet'}') ORDER BY phecode").fetchall()
-    assert rows[0] == ("AA_1", 1, 2, 0, 2)
-    assert rows[1] == ("AA_1.1", 1, 2, 1, 1)  # p1 is protected; p2 is an excluded control
+    rows = duckdb.sql(f"SELECT phecode, case_count, control_count_before_exclusions, excluded_control_count, subthreshold_control_count, control_count_after_exclusions FROM read_parquet('{output / 'phecode_counts.parquet'}') ORDER BY phecode").fetchall()
+    # p2 carries the code on a single date, so under two-dates they are neither a case
+    # nor a clean control -- non-evaluable, matching PheTK's control definition.
+    assert rows[0] == ("AA_1", 1, 2, 0, 1, 1)
+    # For AA_1.1 p2 is both sub-threshold and named by the exclusion rule; they are
+    # removed once, so the control count is 1 either way. p1 is a case and protected.
+    assert rows[1] == ("AA_1.1", 1, 2, 1, 1, 1)
 
 
 def test_invalid_input_and_unmapped_rate(tmp_path: Path, release: Path) -> None:
@@ -148,5 +154,5 @@ def test_cohort_requires_sex_column(tmp_path: Path) -> None:
     write_csv(cohort, ["person_id"], [["p1"], ["p2"]])
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "123.4", "ICD9CM"]])
     output = tmp_path / "run"
-    with pytest.raises(ValueError, match="Cohort requires sex column"):
+    with pytest.raises(ValueError, match=r"cohort is missing required columns: \['sex'\]"):
         map_phecodes(release, cohort, events, output, min_cases=1, min_controls=1)

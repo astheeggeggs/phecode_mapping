@@ -98,8 +98,12 @@ def test_csv_and_parquet_inputs_have_same_results(tmp_path: Path, release: Path)
     write_csv(cohort_csv, ["person_id", "sex"], [["p1", "Female"], ["p2", "Male"]])
     write_csv(events_csv, ["person_id", "code", "vocabulary"], [["p1", "123.4", "ICD9CM"]])
     cohort_pq = tmp_path / "cohort.parquet"; events_pq = tmp_path / "events.parquet"
-    duckdb.sql(f"COPY (SELECT * FROM read_csv_auto('{cohort_csv}')) TO '{cohort_pq}' (FORMAT PARQUET)")
-    duckdb.sql(f"COPY (SELECT * FROM read_csv_auto('{events_csv}')) TO '{events_pq}' (FORMAT PARQUET)")
+    # all_varchar=true matches how the mapper reads CSV. Without it DuckDB infers
+    # code '123.4' as DOUBLE, and the Parquet fixture then carries the numeric-code
+    # corruption that test_input_contract.py exists to reject -- so this parity test
+    # would be comparing a lossy round-trip against a lossless one.
+    duckdb.sql(f"COPY (SELECT * FROM read_csv_auto('{cohort_csv}', all_varchar=true)) TO '{cohort_pq}' (FORMAT PARQUET)")
+    duckdb.sql(f"COPY (SELECT * FROM read_csv_auto('{events_csv}', all_varchar=true)) TO '{events_pq}' (FORMAT PARQUET)")
     csv_output = tmp_path / "csv_run"; pq_output = tmp_path / "pq_run"
     map_phecodes(release, cohort_csv, events_csv, csv_output, min_cases=0, min_controls=0)
     map_phecodes(release, cohort_pq, events_pq, pq_output, min_cases=0, min_controls=0)
@@ -117,4 +121,4 @@ def test_cli_returns_actionable_error(tmp_path: Path, release: Path) -> None:
         "--output", str(tmp_path / "run"),
     ], capture_output=True, text=True)
     assert result.returncode == 1
-    assert "Events missing columns" in result.stderr
+    assert "events is missing required columns: ['vocabulary']" in result.stderr

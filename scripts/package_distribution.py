@@ -28,7 +28,11 @@ if any((args.release / name).exists() for name in ("snomed_map.csv", "snomed_map
     raise SystemExit("This analyst distribution excludes SNOMED-derived outputs; provide an ICD-only release")
 
 root = Path(__file__).resolve().parents[1]
-files = [root / "README.md", root / "ANALYST_GUIDE.md", root / "pyproject.toml", root / "requirements-lock.txt", root / "examples/cohort.csv", root / "examples/events.csv", root / "scripts/verify_release.py", root / "scripts/package_distribution.py", root / "containers/Dockerfile", root / "containers/.dockerignore", root / "containers/Singularity.def"]
+# Every script README.md or ANALYST_GUIDE.md tells an analyst to run must be here.
+# tests/test_distribution.py derives that list from the docs themselves, so adding a
+# documented command without bundling its script fails the suite.
+files = [root / "README.md", root / "ANALYST_GUIDE.md", root / "pyproject.toml", root / "requirements-lock.txt", root / "examples/cohort.csv", root / "examples/events.csv", root / "scripts/verify_release.py", root / "scripts/package_distribution.py",
+         root / "scripts/prepare_ukb_for_mapping.R", root / "containers/Dockerfile", root / "containers/.dockerignore", root / "containers/Singularity.def"]
 files += list((root / "src").rglob("*.py"))
 files += list((root / "src/phecodex_mapper/data").glob("*.csv"))
 args.output.parent.mkdir(parents=True, exist_ok=True)
