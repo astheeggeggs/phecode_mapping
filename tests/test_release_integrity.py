@@ -18,6 +18,9 @@ from pathlib import Path
 
 import pytest
 
+from conftest import write_csv
+from phecodex_mapper.vocabulary import build_vocabulary
+
 VERIFY = Path(__file__).resolve().parents[1] / "scripts" / "verify_release.py"
 
 
@@ -97,3 +100,61 @@ def test_tampering_with_the_manifest_digest_is_caught(full_release: Path) -> Non
     result = _verify(full_release)
     assert result.returncode != 0
     assert "icd_map.parquet" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary provenance.
+#
+# PhecodeX ships the WHO ICD-10 map twice: phecodeX_unrolled_ICD_WHO.csv labels
+# its 20,255 rows ICD10, and phecodeX_unrolled_ICD_UKB.csv labels the
+# byte-identical content ICD10CM (verified: 0 rows differ either way after
+# normalisation). Both are upstream choices, and this tool carries the label
+# through rather than overriding it.
+#
+# The consequence is that two releases are silently incompatible with the same
+# events file, and the vocabulary label alone cannot tell you which you have --
+# an ICD10CM map might be genuine CM or relabelled WHO. Recording the source
+# file per vocabulary makes that visible at the release level.
+# ---------------------------------------------------------------------------
+
+def test_manifest_records_which_source_file_each_vocabulary_came_from(tmp_path: Path) -> None:
+    """Two source files whose vocabulary labels overlap must stay distinguishable."""
+    cm = tmp_path / "cm.csv"
+    write_csv(cm, ["phecode", "ICD", "vocabulary_id"],
+              [["EM_202", "E11", "ICD10CM"], ["EM_202", "E11.9", "ICD10CM"]])
+    who = tmp_path / "who.csv"
+    write_csv(who, ["phecode", "ICD", "vocabulary_id"], [["EM_202", "E11", "ICD10"]])
+
+    release = tmp_path / "rel_prov"
+    build_vocabulary([cm, who], None, release, None)
+    vocabularies = json.loads((release / "manifest.json").read_text())["vocabularies"]
+
+    assert vocabularies["ICD10CM"]["source_files"] == ["cm.csv"]
+    assert vocabularies["ICD10"]["source_files"] == ["who.csv"]
+
+
+def test_vocabulary_row_counts_reconcile_with_the_total(tmp_path: Path) -> None:
+    """Two numbers in one manifest that describe the same thing must agree.
+
+    The first version of this block counted DISTINCT codes under a key named
+    `rows`, so it summed to less than counts.icd_map_rows -- the same class of
+    non-reconciling pair this release metadata exists to prevent.
+    """
+    cm = tmp_path / "cm2.csv"
+    write_csv(cm, ["phecode", "ICD", "vocabulary_id"],
+              [["EM_202", "E11", "ICD10CM"],
+               ["EM_202", "E11.9", "ICD10CM"],
+               ["CV_401", "E11", "ICD10CM"],      # same code, second phecode
+               ["CV_401", "123.4", "ICD9CM"]])
+
+    release = tmp_path / "rel_rec"
+    build_vocabulary(cm, None, release, None)
+    manifest = json.loads((release / "manifest.json").read_text())
+
+    vocabularies = manifest["vocabularies"]
+    assert sum(v["rows"] for v in vocabularies.values()) == manifest["counts"]["icd_map_rows"]
+    # distinct_codes is genuinely smaller where one code carries several phecodes,
+    # which is why the two are reported separately rather than one standing in for
+    # the other.
+    assert vocabularies["ICD10CM"]["rows"] == 3
+    assert vocabularies["ICD10CM"]["distinct_codes"] == 2

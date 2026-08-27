@@ -36,12 +36,16 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         raise ValueError("At least one PhecodeX map is required")
     sources = [relation_for(path) for path in map_paths]
     normalized_sources = []
-    for item in sources:
+    for path, item in zip(map_paths, sources):
         item_columns = _columns(con, item)
         code_column = "ICD" if "ICD" in item_columns else "icd" if "icd" in item_columns else None
         if code_column is None or "phecode" not in item_columns or "vocabulary_id" not in item_columns:
             raise ValueError("PhecodeX map requires columns: phecode, ICD/icd, vocabulary_id")
-        normalized_sources.append(f"SELECT phecode, {code_column} AS ICD, vocabulary_id FROM {item}")
+        # Carry the source filename so the manifest can record which file each
+        # vocabulary label came from -- see the "vocabularies" block below.
+        normalized_sources.append(
+            f"SELECT phecode, {code_column} AS ICD, vocabulary_id, "
+            f"'{Path(path).name}' AS source_file FROM {item}")
     source = " UNION ALL ".join(normalized_sources)
     columns = _columns(con, f"({source})")
     missing = REQUIRED_MAP_COLUMNS - columns
@@ -54,6 +58,16 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         SELECT DISTINCT phecode, ICD AS source_code,
                upper(vocabulary_id) AS vocabulary,
                regexp_replace(upper(trim(ICD)), '[.\\s-]', '', 'g') AS normalized_code
+        FROM source_map
+        WHERE upper(vocabulary_id) IN ('ICD9CM', 'ICD10CM', 'ICD10')
+    """)
+    # Per-vocabulary provenance, kept out of icd_map itself so the shipped map keeps
+    # its existing columns and the phetk_custom_map export is unaffected.
+    con.execute("""
+        CREATE TABLE icd_map_sources AS
+        SELECT DISTINCT upper(vocabulary_id) AS vocabulary,
+               regexp_replace(upper(trim(ICD)), '[.\\s-]', '', 'g') AS normalized_code,
+               source_file
         FROM source_map
         WHERE upper(vocabulary_id) IN ('ICD9CM', 'ICD10CM', 'ICD10')
     """)
@@ -241,6 +255,26 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         "athena_dir": None if not athena_dir else str(athena_dir),
         "counts": {"icd_map_rows": len(icd_rows), "snomed_map_rows": len(snomed_rows)},
         "snomed_bridge": snomed_summary,
+        # Which source file each vocabulary label came from. PhecodeX ships the WHO
+        # ICD-10 map twice: phecodeX_unrolled_ICD_WHO.csv labels its 20,255 rows
+        # ICD10, and phecodeX_unrolled_ICD_UKB.csv labels the byte-identical content
+        # ICD10CM. Both are upstream choices and this tool carries the label through
+        # rather than overriding it -- but that makes two releases silently
+        # incompatible with the same events file, and the label alone cannot tell you
+        # which you have. This can.
+        # `rows` counts icd_map rows so it sums to counts.icd_map_rows; `distinct_codes`
+        # counts codes, which is smaller wherever one code carries several phecodes.
+        # Reporting only the second under the name `rows` made two numbers in the same
+        # manifest fail to reconcile.
+        "vocabularies": {
+            vocabulary: {"rows": rows, "distinct_codes": codes, "source_files": sorted(files)}
+            for vocabulary, rows, codes, files in con.execute("""
+              SELECT m.vocabulary, count(*) AS rows, count(DISTINCT m.normalized_code) AS codes,
+                     (SELECT list(DISTINCT s.source_file) FROM icd_map_sources s
+                      WHERE s.vocabulary = m.vocabulary) AS files
+              FROM icd_map m GROUP BY m.vocabulary ORDER BY m.vocabulary
+            """).fetchall()
+        },
     }
     # Checksum every file this release ships. Without these, verify_release.py can only
     # confirm that filenames exist -- the manifest's own source checksums describe the
