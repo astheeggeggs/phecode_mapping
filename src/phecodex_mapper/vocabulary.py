@@ -121,8 +121,20 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         # multi-phenotype conditions such as "Herpes zoster iridocyclitis", which really
         # is both a zoster infection and an iridocyclitis. A one-to-one SNOMED/ICD
         # equivalence is unaffected, keeping every phecode it had.
+        # Built in two steps, and the order matters. The universe is EVERY ICD code
+        # that collapses onto the concept; the triples are the subset PhecodeX
+        # happens to map. Counting the denominator on the universe rather than the
+        # subset is the whole point: computing it from the already-joined triples
+        # makes both sides of the HAVING enumerate the same truncated set, so the
+        # equality is satisfied trivially and the concept inherits whatever slice
+        # of its sources the map covers. Where that slice is biased -- and it often
+        # is -- the result is the many-to-one inversion this rule exists to stop.
+        # Measured on a full Athena extract, 799 of 13,397 concepts (6.0%) had a
+        # truncated denominator; SNOMED 7895008 "Poisoning by drug" kept
+        # MB_284.2 "Suicide and self-inflicted harm" on the strength of 108 mapped
+        # sources out of 633, all of them the intentional-self-harm variants.
         con.execute("""
-            CREATE TABLE snomed_bridge_triples AS
+            CREATE TABLE snomed_source_universe AS
             WITH snomed AS (
               SELECT concept_id, concept_code FROM concept
               WHERE vocabulary_id = 'SNOMED' AND domain_id = 'Condition'
@@ -138,27 +150,50 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
               FROM relationship r WHERE r.relationship_id = 'Maps to' AND r.invalid_reason IS NULL
             )
             SELECT DISTINCT s.concept_code AS source_code, ic.concept_code AS icd_code,
-              m.phecode, m.source_code AS bridge_icd_code, m.vocabulary AS bridge_vocabulary
+              ic.vocabulary_id
             FROM snomed s JOIN standard_concept sc ON s.concept_id = sc.snomed_id
               JOIN icd_source i ON sc.standard_id = i.standard_id
               JOIN concept ic ON i.icd_id = ic.concept_id
-              -- Athena tags WHO ICD-10 concepts as vocabulary_id='ICD10'; retain
-              -- that as distinct from US clinical-modification ICD10CM.
-              JOIN icd_map m ON regexp_replace(upper(ic.concept_code), '[.\\s-]', '', 'g') = m.normalized_code
-                AND ic.vocabulary_id = m.vocabulary
             WHERE ic.invalid_reason IS NULL
+              -- Only vocabularies this release's map could cover. A source code in a
+              -- vocabulary PhecodeX does not ship (ICD-O, Read, ...) can never imply a
+              -- phecode, so counting it would make the rule impossible to satisfy and
+              -- silently empty the bridge.
+              AND ic.vocabulary_id IN (SELECT DISTINCT vocabulary FROM icd_map)
         """)
         con.execute("""
+            CREATE TABLE snomed_bridge_triples AS
+            SELECT DISTINCT u.source_code, u.icd_code,
+              m.phecode, m.source_code AS bridge_icd_code, m.vocabulary AS bridge_vocabulary
+            FROM snomed_source_universe u
+              -- Athena tags WHO ICD-10 concepts as vocabulary_id='ICD10'; retain
+              -- that as distinct from US clinical-modification ICD10CM.
+              JOIN icd_map m ON regexp_replace(upper(u.icd_code), '[.\\s-]', '', 'g') = m.normalized_code
+                AND u.vocabulary_id = m.vocabulary
+        """)
+        # n_source_icd_codes comes from the UNIVERSE, not the triples. This is the
+        # difference between "every source code implies this phecode" and "every
+        # source code we happen to map implies it" -- only the first is a safe
+        # inference from a broad SNOMED concept to a specific phenotype.
+        con.execute("""
             CREATE TABLE snomed_source_counts AS
-            SELECT source_code, count(DISTINCT icd_code) AS n_source_icd_codes
-            FROM snomed_bridge_triples GROUP BY source_code
+            SELECT u.source_code,
+                   count(DISTINCT u.icd_code) AS n_source_icd_codes,
+                   count(DISTINCT t.icd_code) AS n_source_icd_codes_mapped
+            FROM snomed_source_universe u
+            LEFT JOIN snomed_bridge_triples t
+              ON t.source_code = u.source_code AND t.icd_code = u.icd_code
+            GROUP BY u.source_code
         """)
         con.execute("""
             CREATE TABLE snomed_map AS
             SELECT t.source_code, 'SNOMED' AS vocabulary, t.phecode,
                    min(t.bridge_icd_code) AS bridge_icd_code,
                    min(t.bridge_vocabulary) AS bridge_vocabulary,
-                   any_value(c.n_source_icd_codes) AS source_icd_code_count
+                   any_value(c.n_source_icd_codes) AS source_icd_code_count,
+                   -- Kept alongside so a reviewer can see the coverage behind each
+                   -- retained mapping without recomputing it from the Athena extract.
+                   any_value(c.n_source_icd_codes_mapped) AS source_icd_codes_mapped
             FROM snomed_bridge_triples t JOIN snomed_source_counts c USING (source_code)
             GROUP BY t.source_code, t.phecode
             HAVING count(DISTINCT t.icd_code) = any_value(c.n_source_icd_codes)
@@ -173,10 +208,23 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
             SELECT count(*) FROM (SELECT DISTINCT source_code FROM snomed_bridge_triples)
             WHERE source_code NOT IN (SELECT source_code FROM snomed_map)
         """).fetchone()[0]
+        # How many concepts the map covers only partly. These are the ones the old
+        # truncated denominator silently waved through, so the number belongs in the
+        # manifest: it is the size of the population this rule is protecting against.
+        partial = con.execute("""
+            SELECT count(*) FROM snomed_source_counts
+            WHERE n_source_icd_codes_mapped > 0
+              AND n_source_icd_codes_mapped < n_source_icd_codes
+        """).fetchone()[0]
         snomed_summary = {
-            "rule": "phecode retained only where every source ICD code implies it",
+            # Says what the code does. The previous wording claimed "every source ICD
+            # code" while the denominator counted only mapped ones, so the manifest
+            # asserted a guarantee the build did not provide.
+            "rule": "phecode retained only where every source ICD code that Athena collapses "
+                    "onto the concept implies it, counting sources absent from the PhecodeX map",
             "mappings_dropped_as_ambiguous": dropped,
             "snomed_codes_left_with_no_phecode": ambiguous,
+            "snomed_codes_with_partial_map_coverage": partial,
         }
 
     icd_rows = con.execute("SELECT * FROM icd_map ORDER BY vocabulary, normalized_code, phecode").fetchall()

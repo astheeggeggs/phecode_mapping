@@ -152,3 +152,137 @@ def test_bridge_records_how_many_mappings_it_discarded(collapsed_release: Path) 
     assert summary["rule"].startswith("phecode retained only where every source ICD code")
     assert summary["mappings_dropped_as_ambiguous"] == 1   # 41587001 -> CV_401
     assert summary["snomed_codes_left_with_no_phecode"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The intersection rule was applied against the wrong universe.
+#
+# snomed_bridge_triples is inner-joined to icd_map, so computing
+# n_source_icd_codes from it made BOTH sides of the HAVING enumerate only the
+# codes PhecodeX happens to map. The equality was then satisfied trivially and
+# the concept inherited whatever slice of its sources the map covered -- the
+# same many-to-one inversion the rule exists to prevent.
+#
+# Every fixture above puts 100% of each concept's Athena sources in the map, so
+# none of them exercises this path. That is why the defect survived a suite
+# specifically written for this bridge. Measured on a full Athena extract:
+# 799 of 13,397 concepts (6.0%) had a truncated denominator, and correcting it
+# removes 1,635 mappings across 801 concepts.
+# ---------------------------------------------------------------------------
+
+def test_a_source_code_absent_from_the_map_still_counts_against_the_concept(tmp_path: Path) -> None:
+    """The minimal repro: two sources, one mapped, one not.
+
+    SNOMED 7895008 "Poisoning by drug" collapses both an intentional-self-harm
+    code and an accidental-poisoning code. PhecodeX maps only the first. The
+    concept therefore says nothing about intent and must imply no phecode --
+    but if the accidental code is dropped from the denominator, the self-harm
+    phecode is retained on a unanimity of one.
+    """
+    source = tmp_path / "official.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [
+        ["MB_284.2", "T39.012", "ICD10CM"],   # intentional self-harm -- in the map
+        # 965.1 (accidental poisoning) deliberately absent, as in the real map.
+        # An unrelated ICD9CM row so the release SHIPS ICD9CM: the universe is
+        # filtered to vocabularies the map covers, so without this the absent
+        # 965.1 would be correctly ignored rather than counted.
+        ["ID_001", "008.45", "ICD9CM"],
+    ])
+    athena = _athena(tmp_path / "athena", concepts=[
+        [1, "7895008", "SNOMED", "Condition", "S", ""],
+        [2, "T39.012", "ICD10CM", "Condition", "", ""],
+        [3, "965.1", "ICD9CM", "Condition", "", ""],
+    ], relationships=[[2, 1, "Maps to", ""], [3, 1, "Maps to", ""]])
+    release = tmp_path / "release"
+    build_vocabulary(source, None, release, athena)
+
+    assert _bridge(release) == set(), \
+        "the concept kept a phecode only one of its two source codes implies"
+
+
+def test_a_fully_covered_concept_is_unaffected(tmp_path: Path) -> None:
+    """Positive control: the fix must not simply empty the bridge.
+
+    Where the map covers every source code and they agree, the mapping stands.
+    Verified on real data too: SNOMED 10698009 "Herpes zoster iridocyclitis"
+    keeps all 10 of its phecodes under both the old and the corrected rule.
+    """
+    source = tmp_path / "official.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [
+        ["ID_052", "B02.31", "ICD10CM"],
+        ["ID_052", "B02.32", "ICD10CM"],
+    ])
+    athena = _athena(tmp_path / "athena", concepts=[
+        [1, "10698009", "SNOMED", "Condition", "S", ""],
+        [2, "B02.31", "ICD10CM", "Condition", "", ""],
+        [3, "B02.32", "ICD10CM", "Condition", "", ""],
+    ], relationships=[[2, 1, "Maps to", ""], [3, 1, "Maps to", ""]])
+    release = tmp_path / "release"
+    build_vocabulary(source, None, release, athena)
+    assert _bridge(release) == {("10698009", "ID_052")}
+
+
+def test_partial_map_coverage_is_recorded_in_the_manifest(tmp_path: Path) -> None:
+    """Dropping mappings for a reason nobody can see trades one silence for another."""
+    source = tmp_path / "official.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"],
+              [["MB_284.2", "T39.012", "ICD10CM"], ["ID_001", "008.45", "ICD9CM"]])
+    athena = _athena(tmp_path / "athena", concepts=[
+        [1, "7895008", "SNOMED", "Condition", "S", ""],
+        [2, "T39.012", "ICD10CM", "Condition", "", ""],
+        [3, "965.1", "ICD9CM", "Condition", "", ""],
+    ], relationships=[[2, 1, "Maps to", ""], [3, 1, "Maps to", ""]])
+    release = tmp_path / "release"
+    build_vocabulary(source, None, release, athena)
+    summary = json.loads((release / "manifest.json").read_text())["snomed_bridge"]
+    assert summary["snomed_codes_with_partial_map_coverage"] == 1
+    # The rule string must describe what the code does. The previous wording said
+    # "every source ICD code" while the denominator counted only mapped ones.
+    assert "absent from the PhecodeX map" in summary["rule"]
+
+
+def test_a_source_in_an_unshipped_vocabulary_does_not_empty_the_bridge(tmp_path: Path) -> None:
+    """The opposite failure: too WIDE a universe makes the rule unsatisfiable.
+
+    A SNOMED concept also collapsing a vocabulary PhecodeX does not ship (here
+    ICD-O) must not be penalised for it -- such a code could never imply a
+    phecode, so counting it would silently empty the bridge.
+    """
+    source = tmp_path / "official.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["ID_052", "B02.31", "ICD10CM"]])
+    athena = _athena(tmp_path / "athena", concepts=[
+        [1, "10698009", "SNOMED", "Condition", "S", ""],
+        [2, "B02.31", "ICD10CM", "Condition", "", ""],
+        [3, "8000/0", "ICDO3", "Condition", "", ""],
+    ], relationships=[[2, 1, "Maps to", ""], [3, 1, "Maps to", ""]])
+    release = tmp_path / "release"
+    build_vocabulary(source, None, release, athena)
+    assert _bridge(release) == {("10698009", "ID_052")}
+
+
+def test_an_ambiguous_concept_produces_no_case_end_to_end_under_truncation(tmp_path: Path) -> None:
+    """The consequence that matters, on the real release.
+
+    A patient whose only event is the generic SNOMED poisoning concept was a case
+    for MB_284 and MB_284.2 ("Suicide and self-inflicted harm") under the
+    truncated denominator, and is a case for nothing under the corrected one.
+    """
+    source = tmp_path / "official.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"],
+              [["MB_284.2", "T39.012", "ICD10CM"], ["ID_001", "008.45", "ICD9CM"]])
+    athena = _athena(tmp_path / "athena", concepts=[
+        [1, "7895008", "SNOMED", "Condition", "S", ""],
+        [2, "T39.012", "ICD10CM", "Condition", "", ""],
+        [3, "965.1", "ICD9CM", "Condition", "", ""],
+    ], relationships=[[2, 1, "Maps to", ""], [3, 1, "Maps to", ""]])
+    release = tmp_path / "release"
+    build_vocabulary(source, None, release, athena)
+
+    cohort, events, output = tmp_path / "c.csv", tmp_path / "e.csv", tmp_path / "run"
+    write_csv(cohort, ["person_id", "sex"], [["patient-A", "Female"], ["patient-B", "Female"]])
+    write_csv(events, ["person_id", "code", "vocabulary"], [["patient-A", "7895008", "SNOMED"]])
+    map_phecodes(release, cohort, events, output, min_cases=1, min_controls=0, max_unmapped_rate=1.0)
+
+    cases = duckdb.sql(
+        f"SELECT count(*) FROM read_parquet('{output / 'person_phecodes.parquet'}')").fetchone()[0]
+    assert cases == 0, "a generic poisoning code made the patient a self-harm case"
