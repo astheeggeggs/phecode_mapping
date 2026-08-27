@@ -114,6 +114,48 @@ def validate_cohort_and_events(con, cohort_src: str, event_src: str) -> dict:
             "event_rows_with_unparseable_date": unparseable_dates}
 
 
+def _reject_missing(con, view: str, column: str, label: str) -> None:
+    """Refuse a NULL or blank in a column that is joined on.
+
+    Same three-valued-logic trap as _reject_unusable_values, but for free-text
+    columns with no fixed vocabulary to check against: `x.phecode = m.phecode` is
+    UNKNOWN when either side is NULL, so the rule silently matches nothing.
+    """
+    missing = con.execute(
+        f"SELECT count(*) FROM {view} WHERE {column} IS NULL OR trim({column}) = ''").fetchone()[0]
+    if missing:
+        raise ValueError(
+            f"{label} has {missing} row(s) with an empty {column}. A blank here silently voids the "
+            "whole rule rather than failing, so it is refused.")
+
+
+def _reject_unusable_values(con, view: str, column: str, allowed: tuple[str, ...], label: str) -> None:
+    """Reject rows whose `column` is missing or outside `allowed`.
+
+    `WHERE col NOT IN (...)` is the obvious way to find bad rows and it silently
+    misses the worst input. SQL three-valued logic makes `NULL NOT IN ('a','b')`
+    UNKNOWN rather than TRUE, so a blank cell is never selected and passes
+    validation -- and the join that later applies the rule is UNKNOWN for the same
+    reason, so the rule matches nothing and evaporates without an error. A typo
+    raises; an empty cell is ignored. This is the same three-valued-logic defect
+    already fixed in the exclusion *filter*; these *validation* guards kept it.
+
+    Blank and unrecognised are reported separately because they call for different
+    corrections -- "you left this empty" versus "you misspelled this".
+    """
+    missing = con.execute(
+        f"SELECT count(*) FROM {view} WHERE {column} IS NULL OR trim({column}) = ''").fetchone()[0]
+    if missing:
+        raise ValueError(
+            f"{label} has {missing} row(s) with an empty {column}. A blank here silently voids the "
+            f"whole rule rather than failing, so it is refused. Expected one of: {', '.join(allowed)}.")
+    unrecognised = [r[0] for r in con.execute(
+        f"SELECT DISTINCT {column} FROM {view} WHERE {column} NOT IN {allowed}").fetchall()]
+    if unrecognised:
+        raise ValueError(
+            f"{label} {column} must be one of {', '.join(allowed)}, got: {sorted(unrecognised)}")
+
+
 def _load_excluded_phecodes(con, release: Path, exclude_phenotypes: Path | None) -> dict:
     """Build the `excluded_phecodes` table: phecodes dropped from every output
     (phecode_counts, person_phecodes, eligible_phecodes, phenotype_matrix)
@@ -139,11 +181,8 @@ def _load_excluded_phecodes(con, release: Path, exclude_phenotypes: Path | None)
              trim(CAST(match_value AS VARCHAR)) AS match_value
       FROM {ex_src}
     """)
-    bad_types = con.execute(
-        "SELECT DISTINCT match_type FROM exclude_phenotypes_input WHERE match_type NOT IN ('category', 'phecode')"
-    ).fetchall()
-    if bad_types:
-        raise ValueError(f"--exclude-phenotypes match_type must be 'category' or 'phecode', got: {[r[0] for r in bad_types]}")
+    _reject_unusable_values(con, "exclude_phenotypes_input", "match_type",
+                            ("category", "phecode"), "--exclude-phenotypes")
     # A NULL or blank match_value would put a NULL into excluded_phecodes, and SQL's
     # three-valued logic then makes `phecode NOT IN (...)` UNKNOWN for every row --
     # silently dropping every phecode from every output. Refuse it at the door; the
@@ -498,18 +537,14 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
                  {version_column}
           FROM {ex_src}
         """)
-        bad_types = con.execute(
-            "SELECT DISTINCT exclusion_type FROM exclusions_input "
-            "WHERE exclusion_type NOT IN ('phecode', 'code')"
-        ).fetchall()
-        if bad_types:
-            raise ValueError(f"Exclusions exclusion_type must be phecode or code, got: {[r[0] for r in bad_types]}")
-        bad_vocabularies = con.execute(
-            "SELECT DISTINCT vocabulary FROM exclusions_input "
-            "WHERE vocabulary NOT IN ('ICD9CM', 'ICD10CM', 'ICD10', 'SNOMED')"
-        ).fetchall()
-        if bad_vocabularies:
-            raise ValueError(f"Exclusions vocabulary must be ICD9CM, ICD10CM, ICD10, or SNOMED, got: {[r[0] for r in bad_vocabularies]}")
+        _reject_unusable_values(con, "exclusions_input", "exclusion_type",
+                                ("phecode", "code"), "--control-exclusions")
+        _reject_unusable_values(con, "exclusions_input", "vocabulary",
+                                ("ICD9CM", "ICD10CM", "ICD10", "SNOMED"), "--control-exclusions")
+        # phecode and exclusion_value are equally load-bearing: a blank in either
+        # makes the join UNKNOWN and voids the rule just as quietly.
+        _reject_missing(con, "exclusions_input", "phecode", "--control-exclusions")
+        _reject_missing(con, "exclusions_input", "exclusion_value", "--control-exclusions")
         if "version" in cols: exclusion_version = con.execute("SELECT min(version) FROM exclusions_input").fetchone()[0]
         _apply_control_exclusions(con, "exclusions", "mapped_events")
     _build_cases_and_counts(con, mapped_table="mapped_events", exclusions_table="exclusions",
