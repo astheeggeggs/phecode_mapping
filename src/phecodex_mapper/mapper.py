@@ -582,10 +582,35 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     total = con.execute("SELECT count(*) FROM normalized_events").fetchone()[0]
     unmapped = con.execute("SELECT count(*) FROM unmapped_events").fetchone()[0]
     rate = unmapped / total if total else 0
+    # Per-vocabulary, not just overall. A whole vocabulary mapping badly is a
+    # different problem from a long tail of odd codes, and the aggregate hides it:
+    # two real runs sat at 23.7-23.8% unmapped and nothing remarked on it. The
+    # specific failure this surfaces is a mislabelled vocabulary -- UK Biobank codes
+    # WHO ICD-10, and events labelled ICD10CM are matched against the CM map, so
+    # every WHO-only code is silently discarded. `vocabulary` is taken as ground
+    # truth and nothing else can detect that.
+    by_vocabulary = {
+        v: {"events": n, "unmapped": u, "unmapped_rate": (u / n if n else 0)}
+        for v, n, u in con.execute("""
+          SELECT e.vocabulary, count(*), count(*) FILTER (
+            WHERE NOT EXISTS (SELECT 1 FROM mapped_events m WHERE m.event_id = e.event_id))
+          FROM normalized_events e GROUP BY e.vocabulary ORDER BY e.vocabulary
+        """).fetchall()}
+    # Advisory only: --max-unmapped-rate defaults to 1.0 so the hard check below can
+    # never fire, which is a deliberate default (a site cannot know its rate before
+    # the first run) but leaves nothing to notice a bad one. This warns instead.
+    for vocabulary, stats in by_vocabulary.items():
+        if stats["events"] >= 1000 and stats["unmapped_rate"] > 0.20:
+            print(f"phecodex-map: warning: {stats['unmapped_rate']:.1%} of {vocabulary} events "
+                  f"({stats['unmapped']:,} of {stats['events']:,}) did not map. If this vocabulary "
+                  "is mislabelled -- e.g. WHO ICD-10 events declared as ICD10CM -- the codes are "
+                  "matched against the wrong map and silently discarded. Check the release's "
+                  "vocabularies against your events.", file=sys.stderr)
     audit = {"created_at_utc": dt.datetime.now(dt.UTC).isoformat(), "release": str(release), "case_rule": case_rule,
              "min_cases": min_cases, "min_controls": min_controls, "exclusion_version": exclusion_version,
              "exclude_phenotypes": None if not exclude_phenotypes else {"file": str(exclude_phenotypes), **exclusion_summary},
              "events": total, "unmapped_events": unmapped, "unmapped_rate": rate,
+             "unmapped_by_vocabulary": by_vocabulary,
              "mapping_policy": "exact-match-against-published-map",
              # Every field here is derived. release_has_sex_metadata=false means NO
              # phecode was sex-restricted; n_unknown_sex is the count of people who
