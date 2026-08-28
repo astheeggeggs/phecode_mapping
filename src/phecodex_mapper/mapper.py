@@ -7,7 +7,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from .io import ANALYSIS_TIMEZONE, checksum, connect, quote, relation_for
+from .io import ANALYSIS_TIMEZONE, checksum, connect, pin_workbook_timestamps, quote, relation_for
 
 
 def _columns(con, source: str) -> set[str]:
@@ -19,6 +19,7 @@ def _xlsx(path: Path, headers: list[str], rows: list[tuple]) -> None:
     sheet.append(headers)
     for row in rows: sheet.append(list(row))
     book.save(path)
+    pin_workbook_timestamps(path)
 
 
 # DuckDB type names that carry a code or identifier without losing characters.
@@ -569,10 +570,16 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
         _apply_control_exclusions(con, "exclusions", "mapped_events")
     _build_cases_and_counts(con, mapped_table="mapped_events", exclusions_table="exclusions",
                             case_rule=case_rule, min_cases=min_cases, min_controls=min_controls)
-    con.execute(f"COPY phecode_counts TO '{quote(output / 'phecode_counts.parquet')}' (FORMAT PARQUET)")
-    con.execute(f"COPY phecode_counts TO '{quote(output / 'phecode_counts.csv')}' (HEADER, DELIMITER ',')")
-    con.execute(f"COPY (SELECT * FROM cases) TO '{quote(output / 'person_phecodes.parquet')}' (FORMAT PARQUET)")
-    con.execute(f"COPY (SELECT * FROM unmapped_events) TO '{quote(output / 'unmapped_events.csv')}' (HEADER, DELIMITER ',')")
+    # Ordered, all of them. preserve_insertion_order is off and DuckDB writes in
+    # parallel, so an unordered COPY produced a different file on every run from
+    # identical inputs -- which makes two federated sites unable to compare digests and
+    # conclude anything. ORDER BY ALL sorts by every column left to right, so it stays
+    # correct if a column is added.
+    counts_ordered = "SELECT * FROM phecode_counts ORDER BY phecode"
+    con.execute(f"COPY ({counts_ordered}) TO '{quote(output / 'phecode_counts.parquet')}' (FORMAT PARQUET)")
+    con.execute(f"COPY ({counts_ordered}) TO '{quote(output / 'phecode_counts.csv')}' (HEADER, DELIMITER ',')")
+    con.execute(f"COPY (SELECT * FROM cases ORDER BY ALL) TO '{quote(output / 'person_phecodes.parquet')}' (FORMAT PARQUET)")
+    con.execute(f"COPY (SELECT * FROM unmapped_events ORDER BY ALL) TO '{quote(output / 'unmapped_events.csv')}' (HEADER, DELIMITER ',')")
     rows = con.execute("SELECT * FROM phecode_counts WHERE retained ORDER BY phecode").fetchall()
     headers = [r[0] for r in con.execute("DESCRIBE phecode_counts").fetchall()]
     _xlsx(output / "eligible_phecodes.xlsx", headers, rows)
@@ -774,8 +781,12 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
     # real biobank scale is large -- gzip the CSV, and use zstd (better ratio than the
     # Parquet default) for the Parquet copy.
     output_stem = "phenotype_matrix"
-    con.execute(f"COPY phenotype_matrix TO '{quote(output / (output_stem + '.parquet'))}' (FORMAT PARQUET, COMPRESSION ZSTD)")
-    con.execute(f"COPY phenotype_matrix TO '{quote(output / (output_stem + '.csv.gz'))}' (HEADER, DELIMITER ',', COMPRESSION 'gzip')")
+    # The ORDER BY used when phenotype_matrix was built does not survive the COPY: the
+    # table is materialised unordered and written in parallel, so the two files could
+    # come out in different row orders from each other AND from run to run.
+    matrix_ordered = "SELECT * FROM phenotype_matrix ORDER BY person_id"
+    con.execute(f"COPY ({matrix_ordered}) TO '{quote(output / (output_stem + '.parquet'))}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+    con.execute(f"COPY ({matrix_ordered}) TO '{quote(output / (output_stem + '.csv.gz'))}' (HEADER, DELIMITER ',', COMPRESSION 'gzip')")
     return {
         "n_columns": len(retained_phecodes),
         # Derived from cohort_sex_counts by the caller, not hardwired. When this is

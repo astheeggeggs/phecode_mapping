@@ -9,7 +9,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from . import __version__
-from .io import checksum, connect, quote, relation_for, write_release_metadata
+from .io import checksum, connect, pin_workbook_timestamps, quote, relation_for, write_release_metadata
 
 
 REQUIRED_MAP_COLUMNS = {"phecode", "ICD", "vocabulary_id"}
@@ -31,22 +31,7 @@ def _write_xlsx(path: Path, sheets: dict[str, list[tuple[list[str], list[tuple]]
         for row in rows:
             sheet.append(list(row))
     book.save(path)
-    # An xlsx is a zip, and the member mtimes come from the clock too, so the file
-    # still changes between builds even with docProps pinned. Rewrite them flat.
-    with zipfile.ZipFile(path) as archive:
-        members = [(item, archive.read(item.filename)) for item in archive.infolist()]
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for item, payload in members:
-            if item.filename == "docProps/core.xml":
-                # openpyxl rewrites <dcterms:modified> from the clock at save time, so
-                # setting it on the workbook beforehand does not survive.
-                payload = re.sub(rb"<dcterms:modified[^>]*>[^<]*</dcterms:modified>",
-                                 b'<dcterms:modified xsi:type="dcterms:W3CDTF">'
-                                 b"2000-01-01T00:00:00Z</dcterms:modified>", payload)
-            stamped = zipfile.ZipInfo(item.filename, date_time=(2000, 1, 1, 0, 0, 0))
-            stamped.compress_type = item.compress_type
-            stamped.external_attr = item.external_attr
-            archive.writestr(stamped, payload)
+    pin_workbook_timestamps(path)
 
 
 def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,

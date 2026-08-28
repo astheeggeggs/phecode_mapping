@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import zipfile
 from pathlib import Path
 
 import duckdb
@@ -41,6 +43,30 @@ def write_release_metadata(output: Path, payload: dict) -> None:
 # dates reported. Pinning UTC makes the answer a property of the data rather than of the
 # machine; audit.json records it so two sites can prove they agreed.
 ANALYSIS_TIMEZONE = "UTC"
+
+
+def pin_workbook_timestamps(path: Path) -> None:
+    """Strip the wall clock out of an .xlsx so identical content gives identical bytes.
+
+    openpyxl stamps the current time into docProps/core.xml (and rewrites
+    <dcterms:modified> at save time, so setting it on the workbook beforehand does not
+    survive) and into every zip member's mtime. Without this an output file changes on
+    every run even when nothing about the analysis did, which defeats comparing digests
+    between federated sites.
+    """
+    with zipfile.ZipFile(path) as archive:
+        members = [(item, archive.read(item.filename)) for item in archive.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for item, payload in members:
+            if item.filename == "docProps/core.xml":
+                payload = re.sub(rb"<dcterms:(created|modified)[^>]*>[^<]*</dcterms:\1>",
+                                 lambda m: b"<dcterms:" + m.group(1) + b' xsi:type="dcterms:W3CDTF">'
+                                           b"2000-01-01T00:00:00Z</dcterms:" + m.group(1) + b">",
+                                 payload)
+            stamped = zipfile.ZipInfo(item.filename, date_time=(2000, 1, 1, 0, 0, 0))
+            stamped.compress_type = item.compress_type
+            stamped.external_attr = item.external_attr
+            archive.writestr(stamped, payload)
 
 
 def connect() -> duckdb.DuckDBPyConnection:
