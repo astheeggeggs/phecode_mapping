@@ -66,6 +66,13 @@ def main() -> None:
                         help="CSV resolving codes whose recovery routes disagree. Requires columns "
                              "icd_code and adjudication_A_or_B, where A selects the cross-vocabulary "
                              "assignment and B the SNOMED route.")
+    build.add_argument("--icd-only", action="store_true",
+                        help="Build an ICD-only release: the SNOMED bridge is still built and used "
+                             "as recovery evidence, but snomed_map.csv/parquet are not written and "
+                             "the reference workbook omits the bridge sheet. This is what the analyst "
+                             "distribution requires -- package_distribution.py refuses any release "
+                             "carrying SNOMED-derived tables. The manifest records icd_only=true so "
+                             "their absence is visibly a decision rather than a failed build.")
     build.add_argument("--output", required=True, type=Path,
                         help="Release directory to create. Must not already exist.")
 
@@ -137,7 +144,7 @@ def main() -> None:
                 print(json.dumps({"output": str(args.output), "mapping_policy": audit["mapping_policy"], "matrix_columns": audit.get("phenotype_matrix", {}).get("n_columns")}, indent=2))
         elif args.command == "build-vocabulary":
             build_vocabulary(args.phecodex_map, args.phecodex_info, args.output, args.athena_dir,
-                             args.recover_unmapped, args.recovery_adjudication)
+                             args.recover_unmapped, args.recovery_adjudication, args.icd_only)
         elif args.command == "map-phecodes":
             map_phecodes(args.release, args.cohort, args.events, args.output, args.case_rule, args.control_exclusions, args.min_cases, args.min_controls, args.max_unmapped_rate, args.exclude_phenotypes)
         else:

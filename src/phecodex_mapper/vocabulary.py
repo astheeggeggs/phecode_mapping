@@ -240,13 +240,21 @@ def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
         "assignments_added_by_route": by_route_assignments,
         "codes_skipped_unresolved_disagreement": skipped_codes,
         "assignments_skipped_unresolved_disagreement": skipped,
+        # The cross-vocabulary routes are justified by PhecodeX's own published map and
+        # carry no Athena-derived content. These do not: they exist only because a
+        # SNOMED concept in the Athena extract vouched for them. Recorded so a site can
+        # see exactly how much of its map depends on a vocabulary it may not be
+        # licensed to redistribute, and decide accordingly.
+        "assignments_resting_solely_on_athena_evidence": con.execute(
+            "SELECT count(*) FROM (SELECT DISTINCT normalized_code, vocabulary FROM recovered_rows"
+            " WHERE route IN ('snomed_bridge', 'adjudicated_snomed_bridge'))").fetchone()[0],
         "adjudication": adjudication_meta,
     }
 
 
 def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None, output: Path,
                      athena_dir: Path | None = None, recover_unmapped: bool = False,
-                     recovery_adjudication: Path | None = None) -> None:
+                     recovery_adjudication: Path | None = None, icd_only: bool = False) -> None:
     if output.exists():
         raise FileExistsError(f"Output directory already exists: {output}. Remove it or choose a new --output path.")
     output.mkdir(parents=True)
@@ -314,6 +322,24 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
             sex, description, category = "'Both'", "''", "''"
     else:
         sex, description, category = "'Both'", "''", "''"
+        # --phecodex-info is documented as optional ("omit to default sex=Both and blank
+        # text"), but omitting it used to ship no phecode_info.parquet at all -- and
+        # verify_release.py requires that file, so a site that followed the docs produced
+        # a release which failed the analyst's very first documented step. Honour the
+        # documented default by materialising it instead of leaving a hole.
+        # Phecode only. Do NOT synthesise sex/phecode_string/category columns: a `sex`
+        # column full of 'Both' would make a release that carries no sex knowledge report
+        # release_has_sex_metadata=true, hiding the very condition that flag exists to
+        # expose -- every sex-specific phecode silently scored against the whole cohort.
+        # Likewise a blank `category` column would let --exclude-phenotypes filter by a
+        # category that is not really there. The file states what is known and no more.
+        con.execute("""
+            CREATE TABLE phecode_info_default AS
+            SELECT DISTINCT phecode FROM icd_map ORDER BY phecode
+        """)
+        default_info = "SELECT * FROM phecode_info_default"
+        con.execute(f"COPY ({default_info}) TO '{quote(output / 'phecode_info.parquet')}' (FORMAT PARQUET)")
+        con.execute(f"COPY ({default_info}) TO '{quote(output / 'phecode_info.csv')}' (HEADER, DELIMITER ',')")
     info_join = "LEFT JOIN phecode_info i USING (phecode)" if phecodex_info and "phecode" in _columns(con, relation_for(phecodex_info)) else ""
     # phetk_custom_map.csv is exported after recovery, below, for the same reason.
 
@@ -427,8 +453,13 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         # sites must be able to compare release checksums and conclude they hold the
         # same map; an unordered COPY makes every rebuild a different file.
         snomed_ordered = "SELECT * FROM snomed_map ORDER BY source_code, phecode"
-        con.execute(f"COPY ({snomed_ordered}) TO '{quote(output / 'snomed_map.parquet')}' (FORMAT PARQUET)")
-        con.execute(f"COPY ({snomed_ordered}) TO '{quote(output / 'snomed_map.csv')}' (HEADER, DELIMITER ',')")
+        # --icd-only still BUILDS the bridge, because recovery needs it as evidence, but
+        # ships none of it. The distinction matters: the bridge is how some recovered ICD
+        # rows were justified, while snomed_map.* is Athena-derived content that the
+        # analyst distribution must not redistribute.
+        if not icd_only:
+            con.execute(f"COPY ({snomed_ordered}) TO '{quote(output / 'snomed_map.parquet')}' (FORMAT PARQUET)")
+            con.execute(f"COPY ({snomed_ordered}) TO '{quote(output / 'snomed_map.csv')}' (HEADER, DELIMITER ',')")
         snomed_rows = con.execute("SELECT * FROM snomed_map ORDER BY source_code, phecode").fetchall()
         dropped = con.execute("""
             SELECT count(*) FROM (SELECT DISTINCT source_code, phecode FROM snomed_bridge_triples)
@@ -488,18 +519,24 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
     con.execute(f"COPY ({icd_ordered}) TO '{quote(output / 'icd_map.csv')}' (HEADER, DELIMITER ',')")
 
     icd_rows = con.execute("SELECT * FROM icd_map ORDER BY vocabulary, normalized_code, phecode").fetchall()
-    _write_xlsx(output / "phecodex_reference_maps.xlsx", {
-        "ICD map": (["phecode", "source_code", "vocabulary", "normalized_code"], icd_rows),
-        "SNOMED bridge": (["source_code", "vocabulary", "phecode", "bridge_icd_code",
-                            "bridge_vocabulary", "source_icd_code_count"], snomed_rows),
-    })
+    sheets = {"ICD map": (["phecode", "source_code", "vocabulary", "normalized_code"], icd_rows)}
+    if not icd_only:
+        sheets["SNOMED bridge"] = (["source_code", "vocabulary", "phecode", "bridge_icd_code",
+                                    "bridge_vocabulary", "source_icd_code_count"], snomed_rows)
+    _write_xlsx(output / "phecodex_reference_maps.xlsx", sheets)
     manifest = {
         "tool_version": __version__, "created_at_utc": dt.datetime.now(dt.UTC).isoformat(),
         "phecodex_map": ([{"path": str(path), "sha256": checksum(path)} for path in map_paths]
                          if len(map_paths) > 1 else {"path": str(map_paths[0]), "sha256": checksum(map_paths[0])}),
         "phecodex_info": None if not phecodex_info else {"path": str(phecodex_info), "sha256": checksum(phecodex_info)},
         "athena_dir": None if not athena_dir else str(athena_dir),
-        "counts": {"icd_map_rows": len(icd_rows), "snomed_map_rows": len(snomed_rows)},
+        "counts": {"icd_map_rows": len(icd_rows),
+                   "snomed_map_rows": 0 if icd_only else len(snomed_rows)},
+        # True means the SNOMED bridge was built and used as recovery evidence but its
+        # tables were deliberately not shipped. A site reading this knows the absence of
+        # snomed_map.* is a decision, not a failed build.
+        "icd_only": icd_only,
+        "snomed_bridge_rows_built_but_withheld": len(snomed_rows) if icd_only else 0,
         "snomed_bridge": snomed_summary,
         # Present only when --recover-unmapped was used. Its absence means the map is
         # exactly what the published PhecodeX files contain.

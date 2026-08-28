@@ -46,7 +46,13 @@ def test_preflight_rejects_bad_sex_and_vocab(tmp_path: Path, release: Path) -> N
 
 
 def test_run_workflow_requires_a_complete_release(tmp_path: Path, release: Path) -> None:
-    """The `release` fixture is built without phecode_info, which run requires."""
+    """run must refuse a release that is genuinely missing a required artefact.
+
+    This used to lean on the `release` fixture being built without --phecodex-info, but
+    such a release is now complete by construction, so the premise had quietly become
+    untrue. Delete a required file instead: that is the condition actually being guarded.
+    """
+    (release / "phecode_info.parquet").unlink()
     cohort = tmp_path / "cohort.csv"; events = tmp_path / "events.csv"
     write_csv(cohort, ["person_id", "sex"], [["p1", "Female"]])
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "123.4", "ICD9CM"]])

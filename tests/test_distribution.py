@@ -146,3 +146,142 @@ def test_packaging_refuses_a_corrupted_release(tmp_path: Path, full_release: Pat
     assert result.returncode != 0
     assert "does not verify" in result.stderr
     assert not (tmp_path / "release.tar.gz").exists()
+
+
+def _icd_only_release(tmp_path: Path, name: str):
+    """A recovered release built with --icd-only: bridge used as evidence, not shipped.
+
+    B02.1 is unmapped everywhere and reaches a SNOMED concept bridged from the ICD-9
+    side, so it can ONLY be recovered via the bridge. If --icd-only disabled the bridge
+    rather than merely withholding it, that row would vanish and this fixture would
+    stop proving anything.
+    """
+    from conftest import write_csv
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    source = tmp_path / f"src_{name}.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["ID_052", "003.3", "ICD9CM"]])
+    athena = tmp_path / f"ath_{name}"
+    athena.mkdir()
+    write_csv(athena / "CONCEPT.csv",
+              ["concept_id", "concept_code", "vocabulary_id", "domain_id", "standard_concept", "invalid_reason"],
+              [[4, "003.3", "ICD9CM", "Condition", "", ""], [3, "B02.1", "ICD10", "Condition", "", ""],
+               [5, "77386006", "SNOMED", "Condition", "S", ""]])
+    write_csv(athena / "CONCEPT_RELATIONSHIP.csv",
+              ["concept_id_1", "concept_id_2", "relationship_id", "invalid_reason"],
+              [[4, 5, "Maps to", ""], [3, 5, "Maps to", ""]])
+    release = tmp_path / name
+    build_vocabulary(source, None, release, athena, recover_unmapped=True, icd_only=True)
+    return release
+
+
+def test_icd_only_withholds_the_bridge_but_still_recovers_through_it(tmp_path: Path) -> None:
+    """The distinction the flag exists for.
+
+    snomed_map.* is Athena-derived content the analyst distribution must not
+    redistribute. The bridge itself is how some recovered ICD rows were justified, and
+    dropping it would silently shrink the map instead of just withholding a table.
+    """
+    import duckdb
+    release = _icd_only_release(tmp_path, "icdonly")
+
+    assert not (release / "snomed_map.parquet").exists()
+    assert not (release / "snomed_map.csv").exists()
+    manifest = json.loads((release / "manifest.json").read_text())
+    assert manifest["icd_only"] is True
+    assert manifest["counts"]["snomed_map_rows"] == 0
+    assert manifest["snomed_bridge_rows_built_but_withheld"] > 0, \
+        "the bridge was not built, so recovery lost its evidence rather than just its table"
+
+    recovered = {r[0] for r in duckdb.sql(
+        f"SELECT normalized_code FROM read_csv_auto('{release / 'recovered_codes.csv'}')").fetchall()}
+    assert "B021" in recovered, "a bridge-justified recovery disappeared under --icd-only"
+    assert manifest["recovery"]["assignments_resting_solely_on_athena_evidence"] >= 1
+
+
+def test_the_manifest_never_lists_a_file_it_did_not_ship(tmp_path: Path) -> None:
+    """artifacts is derived from the directory, so withholding a file must not desync it."""
+    release = _icd_only_release(tmp_path, "icdonly2")
+    manifest = json.loads((release / "manifest.json").read_text())
+    on_disk = {p.name for p in release.iterdir() if p.is_file() and p.name != "manifest.json"}
+    assert set(manifest["artifacts"]) == on_disk
+    assert not any("snomed" in name for name in manifest["artifacts"])
+
+
+def test_an_icd_only_release_can_actually_be_packaged(tmp_path: Path) -> None:
+    """The whole point: package_distribution.py refuses anything carrying SNOMED tables.
+
+    Before --icd-only existed there was no way to reach this state, because recovery
+    requires --athena-dir and that always wrote snomed_map.* -- so the recovered map
+    could not be given to analysts at all.
+    """
+    release = _icd_only_release(tmp_path, "icdonly3")
+    bundle = tmp_path / "bundle.tar.gz"
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/package_distribution.py"),
+                             "--release", str(release), "--output", str(bundle)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, f"packaging refused an ICD-only release: {result.stdout}{result.stderr}"
+    assert bundle.is_file()
+    with tarfile.open(bundle) as archive:
+        names = archive.getnames()
+    assert not any("snomed" in n for n in names), "SNOMED content reached the analyst bundle"
+    assert any(n.endswith("release/icd_map.parquet") for n in names)
+
+
+def test_verify_release_accepts_an_icd_only_release(tmp_path: Path) -> None:
+    """An analyst's first documented step must pass on what they were actually sent."""
+    release = _icd_only_release(tmp_path, "icdonly4")
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/verify_release.py"),
+                             "--release", str(release)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["status"] == "ok"
+
+
+def test_a_release_built_without_phecodex_info_is_still_usable(tmp_path: Path) -> None:
+    """--phecodex-info is documented as optional; a site that omits it must not be stranded.
+
+    It used to ship no phecode_info.parquet, and verify_release.py requires that file --
+    so following the documentation produced a release that failed the analyst's first
+    documented step. The documented default (sex=Both, blank text) is now materialised.
+    """
+    from conftest import write_csv
+    from phecodex_mapper.vocabulary import build_vocabulary
+    import duckdb
+
+    source = tmp_path / "noinfo.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"],
+              [["CV_003", "A01.1", "ICD10CM"], ["GI_001", "B02.2", "ICD10"]])
+    release = tmp_path / "noinfo_rel"
+    build_vocabulary(source, None, release, None)
+
+    assert (release / "phecode_info.parquet").is_file()
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/verify_release.py"),
+                             "--release", str(release)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    info = duckdb.sql(f"SELECT * FROM read_parquet('{release / 'phecode_info.parquet'}') "
+                      "ORDER BY phecode").fetchall()
+    assert info == [("CV_003",), ("GI_001",)], info
+    # Deliberately phecode-only. A synthesised `sex` column of 'Both' would make a
+    # release carrying no sex knowledge report release_has_sex_metadata=true, hiding
+    # the condition that flag exists to expose.
+    columns = {c[0] for c in duckdb.sql(
+        f"DESCRIBE SELECT * FROM read_parquet('{release / 'phecode_info.parquet'}')").fetchall()}
+    assert columns == {"phecode"}, f"default info must assert nothing it does not know, got {columns}"
+
+
+def test_the_default_info_covers_every_phecode_in_the_map(tmp_path: Path) -> None:
+    """A phecode present in the map but absent from info would be nameless and unsexed."""
+    from conftest import write_csv
+    from phecodex_mapper.vocabulary import build_vocabulary
+    import duckdb
+
+    source = tmp_path / "cover.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"],
+              [[f"XX_{i:03d}", f"A0{i}.1", "ICD10CM"] for i in range(1, 6)])
+    release = tmp_path / "cover_rel"
+    build_vocabulary(source, None, release, None)
+    missing = duckdb.sql(
+        f"SELECT DISTINCT phecode FROM read_parquet('{release / 'icd_map.parquet'}') "
+        f"EXCEPT SELECT phecode FROM read_parquet('{release / 'phecode_info.parquet'}')").fetchall()
+    assert missing == [], f"phecodes in the map with no info row: {missing}"

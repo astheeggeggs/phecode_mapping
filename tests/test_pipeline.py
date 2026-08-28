@@ -143,7 +143,10 @@ def test_exclude_phenotypes_by_phecode_and_category_error_without_info(tmp_path:
 
     exclude_by_category = tmp_path / "exclude_category.csv"
     write_csv(exclude_by_category, ["match_type", "match_value"], [["category", "Symptoms"]])
-    with pytest.raises(ValueError, match="no phecode_info.parquet"):
+    # A release built without --phecodex-info now ships a phecode-only info table, so
+    # the failure is the missing COLUMN rather than the missing file -- a strictly more
+    # precise diagnosis of the same user error.
+    with pytest.raises(ValueError, match="no 'category' column"):
         map_phecodes(release, cohort, events, tmp_path / "run2", exclude_phenotypes=exclude_by_category)
 
 
