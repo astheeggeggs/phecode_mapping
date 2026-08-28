@@ -40,6 +40,19 @@ person_id,code,vocabulary,event_date
 vocabularies are `ICD9CM`, `ICD10`, `ICD10CM`, and `SNOMED`. Sex must be
 `Male`, `Female`, or blank.
 
+**Be explicit about which ICD-10 you are using.** `ICD10` (WHO) and `ICD10CM`
+(US clinical modification) are different vocabularies and the `vocabulary` column
+is trusted as ground truth — the wrong label does not fail, it silently drops the
+events into `unmapped_events.csv`, or for the 163 codes that exist in both maps
+with different phecodes, assigns the wrong phenotype. **UK Biobank codes WHO
+ICD-10, so use `ICD10`.** Check your run's `audit.json` for
+`unmapped_by_vocabulary`; a rate above about 20% for one vocabulary usually means
+it is mislabelled, and `map-phecodes` warns on stderr when that happens. Check
+also that the release you were sent expects the same label — `manifest.json`
+records under `vocabularies` which source file each label came from, and PhecodeX
+publishes the same WHO map under both names. See the README's "You must state
+which ICD-10 you are mapping" for the detail.
+
 ## Preflight and run
 
 Validate inputs without processing them:

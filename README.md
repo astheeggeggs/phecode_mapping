@@ -138,6 +138,42 @@ An event maps to a phecode only when its normalized code appears in the release'
 PhecodeX map for that vocabulary. There is no inference from parent codes, no
 string-prefix matching, and no cross-vocabulary fallback.
 
+### You must state which ICD-10 you are mapping
+
+`ICD10` (WHO) and `ICD10CM` (US clinical modification) are different vocabularies,
+and the `vocabulary` column is taken as ground truth: a code declared `ICD10CM` is
+matched only against the release's ICD-10-CM rows, never against WHO. Declaring the
+wrong one does not fail — the codes simply do not match, and the events are dropped
+into `unmapped_events.csv`.
+
+This matters more than it sounds, because the two maps differ in both directions:
+
+| | distinct codes in the shipped map |
+|---|---|
+| `ICD10` (WHO) | 8,560 |
+| `ICD10CM` | 55,338 |
+| in both | 7,730 — of which **163 carry different phecodes** |
+
+So there is no safe default. Declaring WHO events as `ICD10CM` loses every WHO-only
+code; declaring CM events as `ICD10` loses CM's finer subdivisions. And for the 163
+codes present in both, the wrong label yields a *different phenotype* rather than no
+phenotype — `J33.x` (nasal polyp) takes only RE_471.5 under CM but also CA_135
+(benign neoplasm) under WHO.
+
+**UK Biobank codes WHO ICD-10, so its events belong under `ICD10`.**
+[`scripts/prepare_ukb_for_mapping.R`](scripts/prepare_ukb_for_mapping.R) emits that
+label. Measured on a 2.6M-event UK Biobank extract, mislabelling it `ICD10CM` moved
+168,769 events between mapped and unmapped.
+
+Two things make a mismatch visible rather than silent. `map-phecodes` reports the
+unmapped rate per vocabulary in `audit.json` and warns on stderr when a vocabulary
+with at least 1,000 events exceeds 20% unmapped. And `manifest.json` records, under
+`vocabularies`, which source file each label came from — worth checking, because
+PhecodeX ships the WHO map twice: `phecodeX_unrolled_ICD_WHO.csv` labels it `ICD10`
+while `phecodeX_unrolled_ICD_UKB.csv` labels byte-identical content `ICD10CM`. A
+release built from the UKB file therefore expects `ICD10CM` events, and pairing it
+with correctly-labelled `ICD10` events leaves 98% of them unmapped.
+
 This is deliberate. The published PhecodeX map is already unrolled to leaf level
 wherever a phecode is assigned, so a code's absence from it is a curation decision
 rather than a gap to be filled. The unmapped branches are dominated by trauma
