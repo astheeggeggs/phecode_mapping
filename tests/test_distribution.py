@@ -285,3 +285,55 @@ def test_the_default_info_covers_every_phecode_in_the_map(tmp_path: Path) -> Non
         f"SELECT DISTINCT phecode FROM read_parquet('{release / 'icd_map.parquet'}') "
         f"EXCEPT SELECT phecode FROM read_parquet('{release / 'phecode_info.parquet'}')").fetchall()
     assert missing == [], f"phecodes in the map with no info row: {missing}"
+
+
+def test_every_documented_command_is_one_the_cli_accepts() -> None:
+    """Docs drift away from argparse silently, and the analyst finds out, not us.
+
+    test_the_docs_reference_scripts_that_exist covers scripts/*; this covers the
+    phecodex-map invocations, which are the commands an analyst actually types.
+    """
+    import shutil
+    binary = shutil.which("phecodex-map") or str(ROOT / ".venv/bin/phecodex-map")
+    invocations = []
+    for doc in ("README.md", "ANALYST_GUIDE.md"):
+        text = (ROOT / doc).read_text()
+        for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+            joined = re.sub(r"\\\n\s*", " ", block)
+            for line in joined.splitlines():
+                # \b stops this matching the image names phecodex-mapper:1.1 / -1.1.sif
+                m = re.search(r"phecodex-map\b(.*)", line.strip())
+                if m and not line.strip().startswith("#"):
+                    invocations.append((doc, m.group(1).split()))
+    assert invocations, "no documented commands found; the extraction regex is probably wrong"
+
+    problems = []
+    for doc, args in invocations:
+        if not args:
+            continue
+        sub = args[0]
+        if sub.startswith("--"):
+            continue
+        help_text = subprocess.run([binary, sub, "--help"], capture_output=True, text=True)
+        if help_text.returncode != 0:
+            problems.append(f"{doc}: unknown subcommand {sub!r}")
+            continue
+        known = set(re.findall(r"(--[a-z0-9-]+)", help_text.stdout))
+        unknown = [a for a in args if a.startswith("--") and a not in known]
+        if unknown:
+            problems.append(f"{doc}: {sub} does not accept {unknown}")
+    assert problems == [], "documented commands the CLI would reject: " + "; ".join(problems)
+
+
+def test_the_docs_show_how_to_build_the_release_analysts_receive() -> None:
+    """The documented build must be the one that produces a packageable release.
+
+    A build-vocabulary example without --icd-only produces a release
+    package_distribution.py refuses, so an analyst following the docs cannot
+    reach a bundle at all.
+    """
+    text = (ROOT / "README.md").read_text()
+    builds = [b for b in re.findall(r"```bash\n(.*?)```", text, re.S) if "build-vocabulary" in b]
+    assert builds, "README documents no build-vocabulary command"
+    assert any("--icd-only" in b for b in builds), \
+        "no documented build produces a release that package_distribution.py will accept"

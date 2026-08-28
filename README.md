@@ -359,6 +359,37 @@ phecodex-map build-vocabulary \
   --output releases/phecodex-1.1
 ```
 
+To build the release you actually hand to analysts, add recovery and `--icd-only`:
+
+```bash
+phecodex-map build-vocabulary \
+  --phecodex-map phecodeX_unrolled_ICD_CM.csv \
+  --phecodex-map phecodeX_unrolled_ICD_WHO.csv \
+  --phecodex-info phecodeX_info_1.1_with_sex.csv \
+  --athena-dir athena \
+  --recover-unmapped \
+  --recovery-adjudication data/icd_recovery_adjudication.csv \
+  --icd-only \
+  --output releases/phecodex-1.1-analyst
+```
+
+`--icd-only` is not optional for a shared release: `package_distribution.py` refuses
+any release carrying SNOMED-derived tables, so without it there is no bundle. The
+SNOMED bridge is still built and still supplies recovery evidence — only its tables
+are withheld, and `manifest.json` records `icd_only: true` so their absence reads as
+a decision rather than a failed build.
+
+Check `recovery.assignments_resting_solely_on_athena_evidence` in the manifest before
+redistributing. On the 1.1 release that is 120 of 1,939 assignments (6.2%); the other
+1,819 are justified by PhecodeX's own published map and carry no Athena-derived
+content. If your site is not licensed to redistribute SNOMED-derived knowledge, that
+number is the part to discuss with your data-access team.
+
+`--phecodex-info` is optional; omitting it ships a phecode-only info table so the
+release still verifies, but the map then carries **no sex restrictions at all** and
+every sex-specific phecode is scored against the whole cohort. `audit.json` reports
+`release_has_sex_metadata: false` when that happens. For any real analysis, supply it.
+
 Builds are byte-reproducible: two builds from identical inputs produce identical
 artefacts and therefore identical checksums, so federated sites can compare
 `manifest.json` digests and establish that they hold the same map. Every table is
