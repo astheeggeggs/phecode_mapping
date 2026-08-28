@@ -75,6 +75,11 @@ Run the mapper:
   --output phecodex_run
 ```
 
+The bundled `examples/` files are a two-person smoke test. Running them exercises
+the whole path but retains **no phenotypes** — the default `--min-cases 200` cannot
+be met by two people — so the run warns and reports `matrix_columns: 0`. That is the
+expected result and confirms the install works; use your own cohort for real output.
+
 The primary RVAS input is:
 
 ```text
