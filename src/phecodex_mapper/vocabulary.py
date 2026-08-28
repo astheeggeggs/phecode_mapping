@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import sys
+import zipfile
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -19,12 +21,32 @@ def _columns(con, source: str) -> set[str]:
 
 def _write_xlsx(path: Path, sheets: dict[str, list[tuple[list[str], list[tuple]]]]) -> None:
     book = Workbook(write_only=True)
+    # openpyxl stamps the current time into docProps, which alone would make every
+    # rebuild a different file even with identical contents. The release is meant to
+    # be checksum-comparable between federated sites, so pin it.
+    book.properties.created = book.properties.modified = dt.datetime(2000, 1, 1)
     for name, (headers, rows) in sheets.items():
         sheet = book.create_sheet(name)
         sheet.append(headers)
         for row in rows:
             sheet.append(list(row))
     book.save(path)
+    # An xlsx is a zip, and the member mtimes come from the clock too, so the file
+    # still changes between builds even with docProps pinned. Rewrite them flat.
+    with zipfile.ZipFile(path) as archive:
+        members = [(item, archive.read(item.filename)) for item in archive.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for item, payload in members:
+            if item.filename == "docProps/core.xml":
+                # openpyxl rewrites <dcterms:modified> from the clock at save time, so
+                # setting it on the workbook beforehand does not survive.
+                payload = re.sub(rb"<dcterms:modified[^>]*>[^<]*</dcterms:modified>",
+                                 b'<dcterms:modified xsi:type="dcterms:W3CDTF">'
+                                 b"2000-01-01T00:00:00Z</dcterms:modified>", payload)
+            stamped = zipfile.ZipInfo(item.filename, date_time=(2000, 1, 1, 0, 0, 0))
+            stamped.compress_type = item.compress_type
+            stamped.external_attr = item.external_attr
+            archive.writestr(stamped, payload)
 
 
 def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
@@ -37,8 +59,8 @@ def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
     spanning 2000-2022 loses every older haemorrhoid episode silently. Neither is
     a curation decision this tool should honour by dropping the events.
 
-    Two independent routes supply evidence, and only evidence already inside the
-    release is used -- nothing is inferred from code structure:
+    Two routes supply evidence, and only evidence already inside the release is used
+    -- nothing is inferred from code structure:
 
       cross_vocabulary  the same code carries phecodes under another vocabulary
                         of the SAME ICD generation (ICD-10 <-> ICD-10-CM); the
@@ -96,7 +118,8 @@ def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
     """)
     # 'A' selects the cross-vocabulary assignment, 'B' the SNOMED route -- the same
     # labels the adjudication report uses, so a reviewed file can be fed straight back.
-    con.execute("CREATE TABLE recovery_adjudicated(normalized_code VARCHAR, choice VARCHAR)")
+    con.execute("CREATE TABLE recovery_adjudicated"
+                "(normalized_code VARCHAR, vocabulary VARCHAR, choice VARCHAR)")
     adjudication_meta = None
     if adjudication:
         adj = relation_for(adjudication)
@@ -104,13 +127,37 @@ def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
         needed = {"icd_code", "adjudication_A_or_B"}
         if needed - adj_columns:
             raise ValueError(f"--recovery-adjudication missing columns: {sorted(needed - adj_columns)}")
+        # A verdict may be scoped to one vocabulary. A blank or absent column means
+        # "any vocabulary", which is what a file written before the column existed
+        # meant. Without this the reviewer's stated scope was silently discarded and
+        # one verdict resolved that code's conflict under every vocabulary at once.
+        vocabulary_expr = ("nullif(upper(trim(CAST(vocabulary AS VARCHAR))), '')"
+                           if "vocabulary" in adj_columns else "CAST(NULL AS VARCHAR)")
         con.execute(f"""
             INSERT INTO recovery_adjudicated
-            SELECT regexp_replace(upper(icd_code), '[.\\s-]', '', 'g'),
+            SELECT regexp_replace(upper(icd_code), '[.\\s-]', '', 'g'), {vocabulary_expr},
                    upper(trim(CAST(adjudication_A_or_B AS VARCHAR)))
             FROM {adj} WHERE adjudication_A_or_B IS NOT NULL
               AND upper(trim(CAST(adjudication_A_or_B AS VARCHAR))) IN ('A', 'B')
         """)
+        # The file is the reviewer's authority, so it must speak with one voice. Two
+        # rows that can both match one code fanned the LEFT JOIN below out into two
+        # resolved rows and applied BOTH verdicts -- adding the union of the two
+        # contradicting routes, which is precisely the guess this feature refuses to
+        # make. Dotted and undotted spellings of one code collide here too.
+        ambiguous = con.execute("""
+            SELECT normalized_code, list_sort(list(DISTINCT coalesce(vocabulary, '*') || '=' || choice))
+            FROM recovery_adjudicated GROUP BY 1
+            HAVING count(*) <> count(DISTINCT coalesce(vocabulary, '*'))
+                OR (count(*) > 1 AND count(*) FILTER (WHERE vocabulary IS NULL) > 0)
+            ORDER BY 1
+        """).fetchall()
+        if ambiguous:
+            raise ValueError(
+                f"--recovery-adjudication has {len(ambiguous)} code(s) matched by more than one "
+                f"verdict, so no single verdict can be applied: "
+                f"{[(c, v) for c, v in ambiguous[:5]]}. Give each code one row, or one row per "
+                f"vocabulary; '*' above is a row with no vocabulary, which matches every one.")
         adjudication_meta = {"path": str(adjudication), "sha256": checksum(adjudication),
                              "verdicts": con.execute("SELECT count(*) FROM recovery_adjudicated").fetchone()[0]}
     con.execute("""
@@ -139,6 +186,7 @@ def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
           ON s.normalized_code = x.normalized_code AND s.vocabulary = x.vocabulary
         LEFT JOIN recovery_adjudicated a
           ON a.normalized_code = coalesce(x.normalized_code, s.normalized_code)
+         AND (a.vocabulary IS NULL OR a.vocabulary = coalesce(x.vocabulary, s.vocabulary))
     """)
     con.execute("""
         CREATE TABLE recovered_rows AS
@@ -158,8 +206,19 @@ def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
               FROM recovered_rows ORDER BY vocabulary, normalized_code, phecode)
         TO '{quote(output / 'recovered_codes.csv')}' (HEADER, DELIMITER ',')
     """)
+    # Two units, kept apart on purpose. A `codes_*` field counts distinct ICD code
+    # STRINGS; an `assignments_*` field counts (code, vocabulary) pairs, which is what
+    # the map actually gains -- one code recovered under both ICD10 and ICD10CM is one
+    # code but two assignments. Reporting one number under a name that reads like the
+    # other is how a 2,121 that should have been 2,204 went unnoticed.
     by_route = dict(con.execute(
         "SELECT route, count(DISTINCT normalized_code) FROM recovered_rows GROUP BY 1 ORDER BY 1").fetchall())
+    by_route_assignments = dict(con.execute(
+        "SELECT route, count(*) FROM (SELECT DISTINCT route, normalized_code, vocabulary "
+        "FROM recovered_rows) GROUP BY 1 ORDER BY 1").fetchall())
+    skipped_codes = con.execute(
+        "SELECT count(DISTINCT normalized_code) FROM recovery_resolved"
+        " WHERE route = 'skipped_unresolved_disagreement'").fetchone()[0]
     skipped = con.execute(
         "SELECT count(*) FROM recovery_resolved WHERE route = 'skipped_unresolved_disagreement'").fetchone()[0]
     unresolved = [r[0] for r in con.execute(
@@ -175,8 +234,12 @@ def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
                 "conflicting routes are skipped unless adjudicated",
         "rows_added": con.execute("SELECT count(*) FROM recovered_rows").fetchone()[0],
         "codes_added": con.execute("SELECT count(DISTINCT normalized_code) FROM recovered_rows").fetchone()[0],
+        "assignments_added": con.execute(
+            "SELECT count(*) FROM (SELECT DISTINCT normalized_code, vocabulary FROM recovered_rows)").fetchone()[0],
         "codes_added_by_route": by_route,
-        "codes_skipped_unresolved_disagreement": skipped,
+        "assignments_added_by_route": by_route_assignments,
+        "codes_skipped_unresolved_disagreement": skipped_codes,
+        "assignments_skipped_unresolved_disagreement": skipped,
         "adjudication": adjudication_meta,
     }
 
@@ -360,8 +423,12 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
             GROUP BY t.source_code, t.phecode
             HAVING count(DISTINCT t.icd_code) = any_value(c.n_source_icd_codes)
         """)
-        con.execute(f"COPY snomed_map TO '{quote(output / 'snomed_map.parquet')}' (FORMAT PARQUET)")
-        con.execute(f"COPY snomed_map TO '{quote(output / 'snomed_map.csv')}' (HEADER, DELIMITER ',')")
+        # Ordered so two builds from identical inputs are byte-identical. Federated
+        # sites must be able to compare release checksums and conclude they hold the
+        # same map; an unordered COPY makes every rebuild a different file.
+        snomed_ordered = "SELECT * FROM snomed_map ORDER BY source_code, phecode"
+        con.execute(f"COPY ({snomed_ordered}) TO '{quote(output / 'snomed_map.parquet')}' (FORMAT PARQUET)")
+        con.execute(f"COPY ({snomed_ordered}) TO '{quote(output / 'snomed_map.csv')}' (HEADER, DELIMITER ',')")
         snomed_rows = con.execute("SELECT * FROM snomed_map ORDER BY source_code, phecode").fetchall()
         dropped = con.execute("""
             SELECT count(*) FROM (SELECT DISTINCT source_code, phecode FROM snomed_bridge_triples)
@@ -390,6 +457,12 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         }
 
     recovery_summary: dict | None = None
+    # Reviewing conflicts and then not running recovery cannot be what anyone meant,
+    # and silently ignoring the file loses the reviewer's work with no signal at all.
+    if recovery_adjudication and not recover_unmapped:
+        raise ValueError("--recovery-adjudication has no effect without --recover-unmapped: "
+                         "the verdicts resolve conflicts between the two recovery routes, and "
+                         "without recovery there are no conflicts to resolve.")
     if recover_unmapped:
         # Both routes need the Athena views (`concept`, `relationship`) and the SNOMED
         # bridge, all of which only exist when --athena-dir was supplied.
@@ -404,13 +477,15 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
           CASE WHEN m.vocabulary='ICD9CM' THEN 9 ELSE 10 END AS flag,
           {sex} AS sex, {description} AS phecode_string, {category} AS phecode_category,
           '' AS exclude_range
-          FROM icd_map m {info_join})
+          FROM icd_map m {info_join}
+          ORDER BY m.vocabulary, m.normalized_code, m.phecode, m.source_code)
         TO '{quote(output / 'phetk_custom_map.csv')}' (HEADER, DELIMITER ',')
     """)
 
     # Written here, not earlier, so recovered rows are in every shipped artefact.
-    con.execute(f"COPY icd_map TO '{quote(output / 'icd_map.parquet')}' (FORMAT PARQUET)")
-    con.execute(f"COPY icd_map TO '{quote(output / 'icd_map.csv')}' (HEADER, DELIMITER ',')")
+    icd_ordered = "SELECT * FROM icd_map ORDER BY vocabulary, normalized_code, phecode, source_code"
+    con.execute(f"COPY ({icd_ordered}) TO '{quote(output / 'icd_map.parquet')}' (FORMAT PARQUET)")
+    con.execute(f"COPY ({icd_ordered}) TO '{quote(output / 'icd_map.csv')}' (HEADER, DELIMITER ',')")
 
     icd_rows = con.execute("SELECT * FROM icd_map ORDER BY vocabulary, normalized_code, phecode").fetchall()
     _write_xlsx(output / "phecodex_reference_maps.xlsx", {

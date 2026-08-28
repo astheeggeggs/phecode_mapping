@@ -201,7 +201,7 @@ codes the map never catches up with — `I84.x` haemorrhoids was reclassified to
 `K64.x`, so a cohort spanning 2000–2022 loses every older haemorrhoid episode with
 no signal at all.
 
-Two independent routes supply evidence. Nothing is inferred from code structure:
+Two routes supply evidence. Nothing is inferred from code structure:
 
 | route | evidence |
 |---|---|
@@ -218,6 +218,17 @@ is external causes against ICD-10's endocrine/metabolic, and ICD-9's `V` chapter
 health status against ICD-10's transport accidents. Recovery is therefore confined
 to `ICD10` ↔ `ICD10CM`, which is the route's purpose; `ICD9CM` has no sibling here
 and takes no cross-vocabulary evidence.
+
+The two routes are **not fully independent**, and `both_routes_agree` should not be
+read as two witnesses. The SNOMED bridge retains a phecode only where every source
+ICD code Athena collapses onto the concept implies it, and it counts those sources
+by code *string* — so a code mapped under ICD-10-CM but absent from the sparser WHO
+map is one voice, not a dissenting second one. That is the right call (absence is
+not disagreement), but it means the bridge can be corroborating a recovery with the
+very ICD-10-CM row the `cross_vocabulary` route already used. Measured on this
+release, that is the case for 181 of the 863 `both_routes_agree` codes, and 42% of
+bridged SNOMED concepts rest on a single source ICD code — "unanimous" over one
+voter. Agreement here raises confidence; it does not double it.
 
 Where both routes fire and agree, or only one fires, the row is added. Where they
 **disagree the code is skipped** and named on stderr, unless
@@ -347,6 +358,12 @@ phecodex-map build-vocabulary \
   --phecodex-info phecodeX_info_1.1_with_sex.csv \
   --output releases/phecodex-1.1
 ```
+
+Builds are byte-reproducible: two builds from identical inputs produce identical
+artefacts and therefore identical checksums, so federated sites can compare
+`manifest.json` digests and establish that they hold the same map. Every table is
+written in a fixed order and the workbook's embedded timestamps are pinned.
+`manifest.json` itself is the one exception — it records `created_at_utc`.
 
 Use the official [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary)
 for source maps and record their checksums. The release builder records source

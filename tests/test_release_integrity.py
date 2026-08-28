@@ -158,3 +158,48 @@ def test_vocabulary_row_counts_reconcile_with_the_total(tmp_path: Path) -> None:
     # the other.
     assert vocabularies["ICD10CM"]["rows"] == 3
     assert vocabularies["ICD10CM"]["distinct_codes"] == 2
+
+
+def test_two_builds_from_the_same_inputs_are_byte_identical(tmp_path: Path) -> None:
+    """A federated study needs sites to prove they hold the same map.
+
+    Every artefact was previously written by an unordered COPY, and the xlsx carried
+    the wall clock in docProps and in each zip member's mtime -- so rebuilding from
+    identical inputs produced different bytes and different checksums. Verification
+    still passed (each release is checked against its own manifest), but two sites
+    could not compare digests and conclude anything, which is most of the point of
+    shipping digests. manifest.json itself is excluded: it records created_at_utc.
+    """
+    from conftest import write_csv
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    source = tmp_path / "repro.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"],
+              [["CV_003", "A01.1", "ICD10CM"], ["GI_001", "B02.2", "ICD10"],
+               ["ID_052", "123.4", "ICD9CM"]])
+    info = tmp_path / "repro_info.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"],
+              [["CV_003", "Both", "One", "Cardiovascular"], ["GI_001", "Female", "Two", "Digestive"],
+               ["ID_052", "Male", "Three", "Infections"]])
+
+    digests = []
+    for name in ("build_one", "build_two"):
+        release = tmp_path / name
+        build_vocabulary(source, info, release, None)
+        digests.append(json.loads((release / "manifest.json").read_text())["artifacts"])
+
+    first, second = digests
+    assert set(first) == set(second)
+    differing = sorted(k for k in first if first[k]["sha256"] != second[k]["sha256"])
+    assert not differing, f"not reproducible: {differing}"
+
+    # Comparing two digests is not enough on its own: the workbook's timestamps have
+    # one-second resolution, so two builds of a small fixture can match by landing in
+    # the same second. Assert the pinned values directly.
+    import zipfile
+    book = tmp_path / "build_one" / "phecodex_reference_maps.xlsx"
+    with zipfile.ZipFile(book) as archive:
+        stamps = {item.date_time for item in archive.infolist()}
+        core = archive.read("docProps/core.xml").decode()
+    assert stamps == {(2000, 1, 1, 0, 0, 0)}, f"zip member mtimes not pinned: {sorted(stamps)}"
+    assert core.count("2000-01-01T00:00:00Z") == 2, "docProps created/modified not both pinned"

@@ -237,3 +237,275 @@ def test_cross_vocabulary_never_crosses_the_icd9_icd10_boundary(tmp_path: Path) 
         "an ICD-9 fall code took an ICD-10 metabolic phecode"
     assert ("ICD10", "A011", "CV_003") in got, \
         "the guard also blocked ICD10CM -> ICD10, which is the route's whole purpose"
+
+
+@pytest.fixture
+def conflict(tmp_path: Path):
+    """D01.1 is in conflict under ICD10: cross says GI_001, the SNOMED route CV_003."""
+    source = tmp_path / "c.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"],
+              [["GI_001", "D01.1", "ICD10CM"], ["CV_003", "E01.1", "ICD10CM"]])
+    concepts = [[1, "D01.1", "ICD10CM", "Condition", "", ""], [2, "D01.1", "ICD10", "Condition", "", ""],
+                [3, "E01.1", "ICD10CM", "Condition", "", ""], [4, "11111004", "SNOMED", "Condition", "S", ""]]
+    return source, concepts, [[3, 4, "Maps to", ""], [2, 4, "Maps to", ""]]
+
+
+def test_a_verdict_scoped_to_one_vocabulary_does_not_leak_to_another(tmp_path: Path, conflict) -> None:
+    """The verdict file's `vocabulary` column is part of the key, not decoration.
+
+    Joining on the bare code let one verdict close that code's conflict under every
+    vocabulary at once, and -- worse -- let two rows for one code both match, so the
+    build applied BOTH verdicts and added the union of the two contradicting routes.
+    Here the ICD10-scoped `A` must decide, and the ICD10CM-scoped `B` must not fire.
+    """
+    source, concepts, rels = conflict
+    verdicts = tmp_path / "scoped.csv"
+    write_csv(verdicts, ["icd_code", "vocabulary", "adjudication_A_or_B"],
+              [["D01.1", "ICD10", "A"], ["D01.1", "ICD10CM", "B"]])
+    release = tmp_path / "scoped_rel"
+    build_vocabulary(source, None, release, _athena(tmp_path / "ath_s", concepts, rels),
+                     recover_unmapped=True, recovery_adjudication=verdicts)
+    got = {p for v, c, p in _map(release) if v == "ICD10" and c == "D011"}
+    assert got == {"GI_001"}, f"expected only the ICD10-scoped verdict to apply, got {got}"
+
+
+@pytest.mark.parametrize("rows,why", [
+    ([["D01.1", "ICD10", "A"], ["D011", "ICD10", "B"]], "same code and vocabulary, contradicting"),
+    ([["D01.1", "ICD10", "A"], ["D01.1", "ICD10", "A"]], "same code and vocabulary, duplicated"),
+    ([["D01.1", "", "A"], ["D01.1", "ICD10", "B"]], "a vocabulary-less row matches every vocabulary"),
+])
+def test_verdicts_that_could_both_match_one_code_are_rejected(tmp_path: Path, conflict, rows, why) -> None:
+    """A review file must speak with one voice; two applicable verdicts is not a tie-break.
+
+    Left unchecked these fanned the join out and inserted both contested phecode sets
+    -- the exact guess between contradicting sources the feature refuses to make.
+    """
+    source, concepts, rels = conflict
+    verdicts = tmp_path / "dup.csv"
+    write_csv(verdicts, ["icd_code", "vocabulary", "adjudication_A_or_B"], rows)
+    with pytest.raises(ValueError, match="more than one verdict"):
+        build_vocabulary(source, None, tmp_path / f"dup_{abs(hash(why))}",
+                         _athena(tmp_path / f"ath_{abs(hash(why))}", concepts, rels),
+                         recover_unmapped=True, recovery_adjudication=verdicts)
+
+
+def test_adjudication_without_recovery_is_refused_not_ignored(tmp_path: Path, fixture) -> None:
+    """Reviewing conflicts and then not running recovery loses the reviewer's work."""
+    source, athena = fixture
+    verdicts = tmp_path / "v2.csv"
+    write_csv(verdicts, ["icd_code", "adjudication_A_or_B"], [["D01.1", "A"]])
+    with pytest.raises(ValueError, match="no effect without --recover-unmapped"):
+        build_vocabulary(source, None, tmp_path / "noop", athena, recovery_adjudication=verdicts)
+
+
+def test_recovery_counters_reconcile_against_the_map_itself(tmp_path: Path) -> None:
+    """The manifest's counts must match what the shipped map actually gained.
+
+    Comparing the manifest against `recovered_codes.csv` proves little -- both are
+    written from the same intermediate. Diffing the two builds' maps is an
+    independent second computation, and it also pins the units: `codes_added` counts
+    code strings while `assignments_added` counts (code, vocabulary) pairs, and
+    reporting one under the other's name is how a 2,121 that was really 2,204 hid.
+
+    The fixture is built so the two units genuinely differ -- B02.1 is unmapped in
+    both ICD-10 flavours and reaches a concept bridged from the ICD-9 side, so it is
+    one code but two assignments. Without that the units test nothing, which is how
+    the original pair of counters went eight months without anyone noticing they
+    disagreed.
+    """
+    source = tmp_path / "units.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["ID_052", "003.3", "ICD9CM"]])
+    athena = _athena(tmp_path / "ath_u", concepts=[
+        [4, "003.3", "ICD9CM", "Condition", "", ""],
+        [3, "B02.1", "ICD10", "Condition", "", ""],
+        [6, "B02.1", "ICD10CM", "Condition", "", ""],
+        [5, "77386006", "SNOMED", "Condition", "S", ""],
+    ], relationships=[[4, 5, "Maps to", ""], [3, 5, "Maps to", ""], [6, 5, "Maps to", ""]])
+    plain, rec = tmp_path / "p", tmp_path / "r"
+    build_vocabulary(source, None, plain, athena)
+    build_vocabulary(source, None, rec, athena, recover_unmapped=True)
+    gained = _map(rec) - _map(plain)
+    summary = json.loads((rec / "manifest.json").read_text())["recovery"]
+    assert len(gained) == summary["rows_added"]
+    assert len({c for _, c, _ in gained}) == summary["codes_added"]
+    assert len({(v, c) for v, c, _ in gained}) == summary["assignments_added"]
+    assert summary["codes_added"] < summary["assignments_added"], \
+        "fixture no longer separates the two units, so this test proves nothing"
+
+
+def _snomed_rows(release: Path) -> int:
+    return duckdb.sql(f"SELECT count(*) FROM read_parquet('{release / 'snomed_map.parquet'}')").fetchone()[0]
+
+
+def test_the_snomed_bridge_cannot_be_widened_by_recovery(tmp_path: Path) -> None:
+    """No circularity -- and this time the fixture can actually show it.
+
+    Comparing snomed_map row counts between two builds proves nothing, because the
+    file is written before recovery runs: the numbers are equal by construction. The
+    invariant needs a concept that WOULD be retained if a recovered row reached the
+    bridge. 11111004 has two source codes; only A01.1 is published, so the unanimity
+    rule drops it. Recovery adds B05.5 under ICD10CM -- exactly the row that would
+    complete the concept. The bridge must still be empty.
+    """
+    published = [["GI_001", "A01.1", "ICD10CM"], ["GI_001", "B05.5", "ICD10"]]
+    concepts = [[1, "A01.1", "ICD10CM", "Condition", "", ""],
+                [2, "B05.5", "ICD10CM", "Condition", "", ""],   # unmapped -> recoverable
+                [3, "B05.5", "ICD10", "Condition", "", ""],
+                [4, "11111004", "SNOMED", "Condition", "S", ""]]
+    rels = [[1, 4, "Maps to", ""], [2, 4, "Maps to", ""]]
+
+    source = tmp_path / "fb.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], published)
+    release = tmp_path / "fb_rel"
+    build_vocabulary(source, None, release, _athena(tmp_path / "ath_fb", concepts, rels),
+                     recover_unmapped=True)
+    assert ("ICD10CM", "B055", "GI_001") in _map(release), "fixture stopped exercising recovery"
+    assert _snomed_rows(release) == 0, "a recovered row reached the SNOMED bridge"
+
+    # Positive control: publish B05.5 under ICD10CM directly -- the state feedback
+    # would have produced -- and the concept IS retained. Without this the assertion
+    # above would pass on a fixture that could never have failed.
+    source2 = tmp_path / "fb2.csv"
+    write_csv(source2, ["phecode", "ICD", "vocabulary_id"], published + [["GI_001", "B05.5", "ICD10CM"]])
+    fed = tmp_path / "fb_fed"
+    build_vocabulary(source2, None, fed, _athena(tmp_path / "ath_fb2", concepts, rels))
+    assert _snomed_rows(fed) > 0, "the fixture cannot show feedback, so the test above is vacuous"
+
+
+def test_recovery_never_adds_a_phecode_to_an_already_published_code(tmp_path: Path, fixture) -> None:
+    """"Purely additive" means new codes only -- not new phecodes on existing ones.
+
+    Asserting the published map is a subset of the recovered one allows a published
+    code to silently acquire an extra phecode from another vocabulary, which would
+    rewrite a curated assignment rather than fill a gap. The phecode set of every
+    published (vocabulary, code) must come out untouched.
+    """
+    source, athena = fixture
+    plain, rec = tmp_path / "pa", tmp_path / "pb"
+    build_vocabulary(source, None, plain, athena)
+    build_vocabulary(source, None, rec, athena, recover_unmapped=True)
+
+    def by_code(release: Path) -> dict:
+        out: dict = {}
+        for vocabulary, code, phecode in _map(release):
+            out.setdefault((vocabulary, code), set()).add(phecode)
+        return out
+
+    before, after = by_code(plain), by_code(rec)
+    assert set(before) <= set(after)
+    for key, phecodes in before.items():
+        assert after[key] == phecodes, f"{key} gained {after[key] - phecodes} from recovery"
+
+
+def test_both_routes_agreeing_is_reported_as_such(tmp_path: Path) -> None:
+    """The both_routes_agree branch carries 863 of the real release's codes.
+
+    No fixture reached it, so turning that branch into a skip passed the suite.
+    """
+    source = tmp_path / "agree.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "A01.1", "ICD10CM"]])
+    athena = _athena(tmp_path / "ath_ag", concepts=[
+        [1, "A01.1", "ICD10CM", "Condition", "", ""],
+        [2, "A01.1", "ICD10", "Condition", "", ""],
+        [5, "77386006", "SNOMED", "Condition", "S", ""],
+    ], relationships=[[1, 5, "Maps to", ""], [2, 5, "Maps to", ""]])
+    release = tmp_path / "ag"
+    build_vocabulary(source, None, release, athena, recover_unmapped=True)
+    routes = {r[0] for r in duckdb.sql(
+        f"SELECT route FROM read_csv_auto('{release / 'recovered_codes.csv'}') "
+        "WHERE normalized_code = 'A011' AND vocabulary = 'ICD10'").fetchall()}
+    assert routes == {"both_routes_agree"}, f"expected both routes to corroborate, got {routes}"
+    assert json.loads((release / "manifest.json").read_text())["recovery"][
+        "codes_added_by_route"].get("both_routes_agree") == 1
+
+
+def test_the_snomed_route_is_labelled_in_the_audit_trail(tmp_path: Path, fixture) -> None:
+    """recovered_codes.csv claims which evidence justified each row; only the
+    cross-vocabulary label was ever asserted, so the SNOMED one could say anything."""
+    source, athena = fixture
+    release = tmp_path / "route_rel"
+    build_vocabulary(source, None, release, athena, recover_unmapped=True)
+    route = duckdb.sql(f"SELECT route FROM read_csv_auto('{release / 'recovered_codes.csv'}') "
+                       "WHERE normalized_code = 'B021'").fetchone()[0]
+    assert route == "snomed_bridge"
+
+
+def test_the_cli_flag_actually_switches_recovery_on(tmp_path: Path, fixture, monkeypatch) -> None:
+    """The wiring was untested: making --recover-unmapped a no-op passed the suite."""
+    from phecodex_mapper import cli
+    source, athena = fixture
+    release = tmp_path / "cli_rel"
+    monkeypatch.setattr("sys.argv", [
+        "phecodex-map", "build-vocabulary", "--phecodex-map", str(source),
+        "--athena-dir", str(athena), "--recover-unmapped", "--output", str(release)])
+    cli.main()
+    assert ("ICD10", "A011", "CV_003") in _map(release)
+    assert json.loads((release / "manifest.json").read_text())["recovery"]["rows_added"] > 0
+
+
+def test_a_partial_overlap_between_the_routes_is_a_disagreement(tmp_path: Path) -> None:
+    """Codes carrying several phecodes are the norm, and no fixture had one.
+
+    The routes are compared as whole sorted lists, so `{GI_001, GI_002}` against
+    `{GI_001}` must count as a disagreement. Tested only on singletons, a comparison
+    that took the first element, or any overlap, would look correct -- and would
+    quietly assert the narrower of two contradicting answers.
+    """
+    source = tmp_path / "multi.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [
+        ["GI_001", "D01.1", "ICD10CM"], ["GI_002", "D01.1", "ICD10CM"],  # two phecodes
+        ["GI_001", "E01.1", "ICD10CM"],                                   # bridged: GI_001 only
+    ])
+    athena = _athena(tmp_path / "ath_multi", concepts=[
+        [1, "D01.1", "ICD10CM", "Condition", "", ""],
+        [2, "D01.1", "ICD10", "Condition", "", ""],
+        [3, "E01.1", "ICD10CM", "Condition", "", ""],
+        [4, "11111004", "SNOMED", "Condition", "S", ""],
+    ], relationships=[[3, 4, "Maps to", ""], [2, 4, "Maps to", ""]])
+    release = tmp_path / "multi_rel"
+    build_vocabulary(source, None, release, athena, recover_unmapped=True)
+
+    assert not {p for v, c, p in _map(release) if v == "ICD10" and c == "D011"}, \
+        "a partial overlap was treated as agreement and recovered anyway"
+    summary = json.loads((release / "manifest.json").read_text())["recovery"]
+    assert summary["codes_skipped_unresolved_disagreement"] == 1
+
+
+def test_a_verdict_does_not_resolve_a_different_code(tmp_path: Path, conflict) -> None:
+    """The join key is the code. A verdict for Z99.9 must leave D01.1 unresolved."""
+    source, concepts, rels = conflict
+    verdicts = tmp_path / "other.csv"
+    write_csv(verdicts, ["icd_code", "vocabulary", "adjudication_A_or_B"], [["Z99.9", "ICD10", "A"]])
+    release = tmp_path / "other_rel"
+    build_vocabulary(source, None, release, _athena(tmp_path / "ath_o", concepts, rels),
+                     recover_unmapped=True, recovery_adjudication=verdicts)
+    assert not {p for v, c, p in _map(release) if v == "ICD10" and c == "D011"}, \
+        "an unrelated verdict resolved this code's conflict"
+    assert json.loads((release / "manifest.json").read_text())["recovery"][
+        "codes_skipped_unresolved_disagreement"] == 1
+
+
+def test_one_code_can_take_different_routes_in_different_vocabularies(tmp_path: Path) -> None:
+    """The routes are paired per (code, vocabulary), not per code.
+
+    B02.1 is unmapped under both ICD10CM and ICD9CM. Under ICD10CM it has same-era
+    cross evidence; under ICD9CM it has only the SNOMED bridge, the era guard having
+    correctly refused the ICD-10 row. Pairing the two routes on the code alone would
+    fuse these into one row and lose the ICD9CM recovery entirely -- and this is also
+    the only coverage of recovery into ICD9CM, which the real release does twice.
+    """
+    source = tmp_path / "routes.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["GI_001", "B02.1", "ICD10"]])
+    athena = _athena(tmp_path / "ath_rt", concepts=[
+        [1, "B02.1", "ICD10", "Condition", "", ""],       # published
+        [6, "B02.1", "ICD10CM", "Condition", "", ""],     # candidate: cross evidence only
+        [9, "B02.1", "ICD9CM", "Condition", "", ""],      # candidate: SNOMED evidence only
+        [4, "11111004", "SNOMED", "Condition", "S", ""],
+    ], relationships=[[1, 4, "Maps to", ""], [9, 4, "Maps to", ""]])
+    release = tmp_path / "routes_rel"
+    build_vocabulary(source, None, release, athena, recover_unmapped=True)
+
+    routes = dict(duckdb.sql(
+        f"SELECT vocabulary, route FROM read_csv_auto('{release / 'recovered_codes.csv'}') "
+        "WHERE normalized_code = 'B021'").fetchall())
+    assert routes == {"ICD10CM": "cross_vocabulary", "ICD9CM": "snomed_bridge"}, routes

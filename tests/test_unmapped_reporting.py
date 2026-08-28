@@ -29,10 +29,16 @@ from phecodex_mapper.vocabulary import build_vocabulary
 
 
 def _release(tmp_path: Path) -> Path:
-    """A map holding ICD10CM A01.1 and ICD9CM 123.4 -- nothing else."""
+    """ICD10CM A01.1, ICD9CM 123.4, and WHO-only ICD10 B02.2 -- nothing else.
+
+    B02.2 exists under ICD10 and not ICD10CM, which is the shape that makes a
+    mislabel detectable: declared as ICD10CM it fails, and the sibling map would
+    have taken it.
+    """
     source = tmp_path / "official.csv"
     write_csv(source, ["phecode", "ICD", "vocabulary_id"],
-              [["GU_001", "A01.1", "ICD10CM"], ["CV_003", "123.4", "ICD9CM"]])
+              [["GU_001", "A01.1", "ICD10CM"], ["CV_003", "123.4", "ICD9CM"],
+               ["GU_001", "B02.2", "ICD10"]])
     info = tmp_path / "info.csv"
     write_csv(info, ["phecode", "sex", "phecode_string", "category"],
               [["GU_001", "Both", "Something", "Genitourinary"],
@@ -69,17 +75,45 @@ def test_unmapped_rate_is_reported_per_vocabulary(tmp_path: Path) -> None:
     assert audit["unmapped_rate"] == 1 / 6
 
 
-def test_a_badly_mapping_vocabulary_warns(tmp_path: Path, capsys) -> None:
-    """The real scenario: a whole vocabulary matched against the wrong map."""
+def test_a_mislabelled_vocabulary_warns(tmp_path: Path, capsys) -> None:
+    """The real scenario: WHO ICD-10 codes declared as ICD10CM.
+
+    What makes this detectable is not the unmapped rate -- it is that the failing
+    codes would map under the sibling label.
+    """
     release = _release(tmp_path)
-    # 1,200 events, none of which the map contains -- the shape of WHO ICD-10
-    # codes declared as ICD10CM.
-    events = [[f"p{i}", "Z99.9", "ICD10CM"] for i in range(1200)]
+    events = [[f"p{i}", "B02.2", "ICD10CM"] for i in range(1200)]
     _run(tmp_path, release, events, "bad")
     err = capsys.readouterr().err
-    assert "did not map" in err
-    assert "ICD10CM" in err
-    assert "mislabelled" in err, "the warning should name the likely cause, not just the number"
+    assert "looks mislabelled" in err
+    assert "ICD10CM" in err and "ICD10" in err
+    assert "WOULD map" in err, "the warning must show the evidence, not just the rate"
+
+
+def test_a_coarse_map_does_not_warn_however_bad_the_rate(tmp_path: Path, capsys) -> None:
+    """The decisive negative control, and the reason this check was rewritten.
+
+    A correctly-labelled UK Biobank extract sits at 20.3% unmapped because PhecodeX's
+    WHO map is coarse, not because the label is wrong. The old rate-only threshold
+    fired on exactly that -- flagging the right answer and advising a relabel that
+    corrupts the run. Codes absent from BOTH maps must produce silence no matter how
+    many of them there are.
+    """
+    release = _release(tmp_path)
+    events = [[f"p{i}", "Z99.9", "ICD10CM"] for i in range(1200)]
+    _run(tmp_path, release, events, "coarse")
+    assert "mislabelled" not in capsys.readouterr().err
+
+
+def test_the_audit_records_the_counterfactual_not_just_the_rate(tmp_path: Path) -> None:
+    """The evidence behind the warning belongs in audit.json, fired or not."""
+    release = _release(tmp_path)
+    events = [[f"p{i}", "B02.2", "ICD10CM"] for i in range(1200)]
+    audit = _run(tmp_path, release, events, "cf")
+    cm = audit["unmapped_by_vocabulary"]["ICD10CM"]
+    assert cm["sibling_vocabulary"] == "ICD10"
+    assert cm["unmapped_events_that_would_map_as_sibling"] == 1200
+    assert cm["share_of_unmapped_rescued_by_sibling"] == 1.0
 
 
 def test_a_healthy_vocabulary_does_not_warn(tmp_path: Path, capsys) -> None:
@@ -91,7 +125,7 @@ def test_a_healthy_vocabulary_does_not_warn(tmp_path: Path, capsys) -> None:
     release = _release(tmp_path)
     events = [[f"p{i}", "A01.1", "ICD10CM"] for i in range(1200)]
     _run(tmp_path, release, events, "good")
-    assert "did not map" not in capsys.readouterr().err
+    assert "mislabelled" not in capsys.readouterr().err
 
 
 def test_a_small_vocabulary_does_not_warn(tmp_path: Path, capsys) -> None:
@@ -101,6 +135,35 @@ def test_a_small_vocabulary_does_not_warn(tmp_path: Path, capsys) -> None:
     unmapped events does not produce noise that trains analysts to ignore it.
     """
     release = _release(tmp_path)
-    events = [["p1", "A01.1", "ICD10CM"], ["p2", "999.9", "ICD9CM"]]
+    events = [["p1", "A01.1", "ICD10CM"], ["p2", "B02.2", "ICD10CM"]]
     _run(tmp_path, release, events, "small")
-    assert "did not map" not in capsys.readouterr().err
+    assert "mislabelled" not in capsys.readouterr().err
+
+
+def test_the_threshold_is_pinned_from_both_sides(tmp_path: Path, capsys) -> None:
+    """A constant no test can move is a constant that can be silently disabled.
+
+    Both cases below are the measured reality rather than round numbers. On 2.5M
+    UK Biobank events the sibling label rescues 19.8% of the failures when the
+    vocabulary really is mislabelled, and 0.8% when it is labelled correctly and
+    the map is merely coarse. The 5% threshold has to separate those two, so the
+    test asserts against both -- with only the extreme 100% case, raising the
+    threshold to 0.99 disables the check and nothing notices.
+    """
+    release = _release(tmp_path)
+
+    # 240 rescuable of 1,200 unmapped = 20%, the true-mislabel case.
+    events = ([[f"p{i}", "B02.2", "ICD10CM"] for i in range(240)]
+              + [[f"q{i}", "Z99.9", "ICD10CM"] for i in range(960)])
+    audit = _run(tmp_path, release, events, "mixed_hi")
+    share = audit["unmapped_by_vocabulary"]["ICD10CM"]["share_of_unmapped_rescued_by_sibling"]
+    assert 0.19 < share < 0.21
+    assert "looks mislabelled" in capsys.readouterr().err, f"share {share:.1%} should warn"
+
+    # 10 rescuable of 1,250 unmapped = 0.8%, the correctly-labelled coarse-map case.
+    events = ([[f"r{i}", "B02.2", "ICD10CM"] for i in range(10)]
+              + [[f"s{i}", "Z99.9", "ICD10CM"] for i in range(1240)])
+    audit = _run(tmp_path, release, events, "mixed_lo")
+    share = audit["unmapped_by_vocabulary"]["ICD10CM"]["share_of_unmapped_rescued_by_sibling"]
+    assert 0.005 < share < 0.01
+    assert "looks mislabelled" not in capsys.readouterr().err, f"share {share:.1%} must not warn"

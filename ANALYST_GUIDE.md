@@ -46,8 +46,12 @@ is trusted as ground truth — the wrong label does not fail, it silently drops 
 events into `unmapped_events.csv`, or for the 163 codes that exist in both maps
 with different phecodes, assigns the wrong phenotype. **UK Biobank codes WHO
 ICD-10, so use `ICD10`.** Check your run's `audit.json` for
-`unmapped_by_vocabulary`; a rate above about 20% for one vocabulary usually means
-it is mislabelled, and `map-phecodes` warns on stderr when that happens. Check
+`unmapped_by_vocabulary`. **Do not judge this by the unmapped rate alone** — a
+correctly labelled UK Biobank extract sits near 20% simply because PhecodeX's WHO
+map is coarse, so the rate cannot tell a mislabel from an honest gap. The field that
+can is `share_of_unmapped_rescued_by_sibling`: the fraction of your failing events
+that *would* map under the other ICD-10 label. Correctly labelled data sits near 1%;
+genuinely mislabelled data sits near 20%. `map-phecodes` warns on stderr above 5%. Check
 also that the release you were sent expects the same label — `manifest.json`
 records under `vocabularies` which source file each label came from, and PhecodeX
 publishes the same WHO map under both names. See the README's "You must state
