@@ -345,6 +345,31 @@ release, its manifest/checksum, documentation, and synthetic fixtures. Keep
 licensed vocabulary sources at the site that built the release. The repository
 is configured to ignore local releases, Athena files, and generated outputs.
 
+## Provenance and citation
+
+This tool does not define phenotypes. It applies the published **PhecodeX v1.1**
+mapping, and any analysis using it should cite the source:
+
+> Shuey MM, Stead WW, Aka I, et al. Next-generation phenotyping: introducing
+> phecodeX for enhanced discovery research in medical phenomics.
+> *Bioinformatics*. 2023;39(11):btad655. doi:10.1093/bioinformatics/btad655
+> (PMID 37930895)
+
+Source maps come from the [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary);
+`manifest.json` records the path and sha256 of every input file used, so a result
+can be traced back to the exact map that produced it. Where this tool departs from
+the published map — the opt-in recovery of omitted codes, and the one adjudicated
+limb-pain verdict — it is recorded in `recovered_codes.csv` and the manifest rather
+than folded in silently.
+
+Releases built with `--athena-dir` use an OMOP/Athena vocabulary extract. Athena
+content is separately licensed and **must not be redistributed**; `--icd-only` exists
+so a shared release carries none of its tables. See the note above on
+`assignments_resting_solely_on_athena_evidence` before sharing a recovered map.
+
+Cross-checks against [PheTK](https://github.com/nhgritctran/PheTK) use the adapter in
+`phetk_custom_map.csv`.
+
 ## Advanced release building
 
 Consortium maintainers can build a release from official PhecodeX files with
