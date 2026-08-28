@@ -510,7 +510,18 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
       FROM events_input e JOIN cohort c ON c.person_id = CAST(e.person_id AS VARCHAR)
     """)
     con.execute(f"CREATE VIEW icd_map AS SELECT * FROM read_parquet('{quote(release / 'icd_map.parquet')}')")
-    snomed_exists = (release / "snomed_map.parquet").exists()
+    # Trust the manifest, not the filesystem. Loading this file because it merely exists
+    # meant an --icd-only release -- one built to withhold Athena-derived tables -- would
+    # silently start assigning SNOMED phecodes again if a stray copy appeared beside it.
+    release_manifest = json.loads((release / "manifest.json").read_text())
+    recorded = set(release_manifest.get("artifacts") or {})
+    snomed_exists = (release / "snomed_map.parquet").exists() and "snomed_map.parquet" in recorded
+    if (release / "snomed_map.parquet").exists() and not snomed_exists:
+        raise ValueError(
+            "snomed_map.parquet is present in the release but is not recorded in "
+            "manifest.json. This release was not built with it, so using it would produce "
+            "phecodes the release does not claim to contain. Remove the file, or use a "
+            "release that records it. Run scripts/verify_release.py to check the release.")
     if snomed_exists: con.execute(f"CREATE VIEW snomed_map AS SELECT * FROM read_parquet('{quote(release / 'snomed_map.parquet')}')")
     con.execute("""
       CREATE TABLE mapped_events AS

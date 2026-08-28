@@ -58,6 +58,25 @@ def verify(directory: Path) -> dict:
         if name != "manifest.json" and name not in artifacts:
             raise SystemExit(f"{name} is present but carries no manifest checksum; the release is inconsistent")
 
+    # An unrecorded file was reported and then passed. That is not cosmetic: map-phecodes
+    # loads snomed_map.parquet if it merely EXISTS, so dropping one into an --icd-only
+    # release silently restores SNOMED mappings the release deliberately withheld, and
+    # verification blessed it. A release is what the manifest says it is; anything else
+    # in the directory means the release is not the one that was built.
+    # Files map-phecodes reads by NAME. An inert extra file (notes, .DS_Store) is
+    # untidy; one of these is a behaviour change, because the mapper picks them up by
+    # presence -- dropping snomed_map.parquet into an --icd-only release silently
+    # restores the SNOMED mappings it was built to withhold.
+    CONSUMED = {"icd_map.parquet", "phecode_info.parquet", "snomed_map.parquet"}
+    smuggled = sorted(name for name in CONSUMED
+                      if name not in artifacts and (directory / name).is_file())
+    if smuggled:
+        raise SystemExit(
+            "Release verification FAILED: " + ", ".join(smuggled) + " present but not recorded "
+            "in the manifest. map-phecodes reads these by name, so this release would produce "
+            "phecodes it does not claim to contain. Remove them, or obtain a release built with "
+            "them.")
+
     unexpected = sorted(p.name for p in directory.iterdir()
                         if p.is_file() and p.name != "manifest.json" and p.name not in artifacts)
     return {"release": str(directory), "manifest_sha256": sha256(directory / "manifest.json"),

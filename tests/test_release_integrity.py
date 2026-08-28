@@ -203,3 +203,32 @@ def test_two_builds_from_the_same_inputs_are_byte_identical(tmp_path: Path) -> N
         core = archive.read("docProps/core.xml").decode()
     assert stamps == {(2000, 1, 1, 0, 0, 0)}, f"zip member mtimes not pinned: {sorted(stamps)}"
     assert core.count("2000-01-01T00:00:00Z") == 2, "docProps created/modified not both pinned"
+
+
+def test_a_smuggled_snomed_map_fails_verification(tmp_path: Path, full_release: Path) -> None:
+    """An unrecorded file the mapper reads by name is a behaviour change, not clutter.
+
+    map-phecodes loads snomed_map.parquet if it merely EXISTS, so dropping one beside
+    an --icd-only release silently restores the SNOMED mappings that release was built
+    to withhold -- and verification previously reported it under unexpected_files and
+    then returned "ok" with exit 0.
+    """
+    (full_release / "snomed_map.parquet").write_bytes(b"not really parquet")
+    result = _verify(full_release)
+    assert result.returncode != 0
+    assert "snomed_map.parquet" in result.stderr
+    assert "not recorded in the manifest" in result.stderr
+
+
+def test_the_mapper_refuses_a_release_carrying_an_unrecorded_snomed_map(
+        tmp_path: Path, full_release: Path) -> None:
+    """Belt and braces: the mapper must not depend on anyone having run verify first."""
+    from conftest import write_csv
+    from phecodex_mapper.mapper import map_phecodes
+
+    (full_release / "snomed_map.parquet").write_bytes(b"not really parquet")
+    cohort, events = tmp_path / "c.csv", tmp_path / "e.csv"
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"]])
+    write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "A01.1", "ICD10CM"]])
+    with pytest.raises(ValueError, match="not recorded in manifest.json"):
+        map_phecodes(full_release, cohort, events, tmp_path / "out", min_cases=1, min_controls=1)
