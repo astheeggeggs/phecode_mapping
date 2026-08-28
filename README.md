@@ -220,10 +220,29 @@ under `recovery` in `manifest.json` along with the adjudication file's checksum.
 Recovery runs *after* the SNOMED bridge and never feeds back into it, so it cannot
 bootstrap itself, and it is purely additive — no published assignment is rewritten.
 
-Measured on the full Athena extract with 20 adjudicated verdicts: 2,109 codes
-(4,733 rows) added, 12 conflicts skipped as unadjudicated. On a 2.6M-event UK
-Biobank extract that moved unmapped from 23.74% to 20.25% — 90,804 events across
-1,046 codes.
+[`data/icd_recovery_adjudication.csv`](data/icd_recovery_adjudication.csv) holds
+the reviewed verdicts for this release: 32 conflicts, 31 resolved to the
+cross-vocabulary assignment and one (`M79.66`) to the SNOMED route, because the
+cross-vocabulary option there is the upstream defect described below.
+
+Measured on the full Athena extract with those verdicts: **2,121 codes (4,757 rows)
+added, 0 conflicts left unresolved**, taking the WHO ICD-10 side of the map from
+8,560 distinct codes to 10,487.
+
+The effect on phenotypes is not uniform — it concentrates on traits the retired
+codes had quietly gutted. On a 336,304-person cohort, 246 phecodes gained cases and
+none lost any:
+
+| phecode | before | after | |
+|---|---|---|---|
+| `CV_439` Hemorrhoids | 507 | 22,726 | 45× |
+| `MS_745` Fractures | 5,934 | 19,167 | |
+| `GI_524.1` Irritable bowel syndrome | 64 | 4,585 | 72× |
+
+Haemorrhoids at 507 of 336,304 is 0.15%, which is not a plausible hospital-coded
+rate for an older cohort; the codes had been lost to the `I84`→`K64`
+reclassification. Before recovery that phenotype was not under-ascertained, it was
+unusable — and nothing in the outputs said so.
 
 Doing this at build time rather than at mapping time is deliberate. A federated
 analysis needs every site to make the same decision once; a run-time fallback
