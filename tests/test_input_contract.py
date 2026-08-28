@@ -14,6 +14,7 @@ way, which is why the existing CSV/Parquet parity test could not see any of this
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import duckdb
@@ -159,3 +160,55 @@ def test_person_id_string_variants_do_not_collide(tmp_path: Path, full_release: 
     rows = duckdb.sql(
         f"SELECT count(*) FROM read_parquet('{output / 'phenotype_matrix.parquet'}')").fetchone()[0]
     assert rows == 3
+
+
+def test_numeric_person_id_types_that_would_join_nothing_are_refused(tmp_path: Path) -> None:
+    """The check must join the way the pipeline joins, or it is not checking it.
+
+    The pipeline casts person_id to VARCHAR on both sides, so an INTEGER cohort against
+    a DOUBLE events column compares '1' to '1.0' and matches nothing. The guard for that
+    joined on the RAW types, where DuckDB coerces and 1 = 1.0 matches -- so it saw a
+    clean join while the pipeline discarded every event. The run then completed
+    reporting events: 0, unmapped: 0 and an unmapped rate of 0.0, which passes even
+    --max-unmapped-rate 0.0.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    source = tmp_path / "m.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "I10", "ICD10CM"]])
+    info = tmp_path / "i.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"], [["CV_003", "Both", "H", "C"]])
+    release = tmp_path / "rel"
+    build_vocabulary(source, info, release, None)
+
+    cohort, events = tmp_path / "c.parquet", tmp_path / "e.parquet"
+    pq.write_table(pa.table({"person_id": pa.array([1, 2, 3], type=pa.int32()),
+                             "sex": ["Female"] * 3}), cohort)
+    pq.write_table(pa.table({"person_id": pa.array([1.0, 2.0, 3.0], type=pa.float64()),
+                             "code": ["I10"] * 3, "vocabulary": ["ICD10CM"] * 3}), events)
+
+    with pytest.raises(ValueError, match="none of the 3 event rows match a person in the cohort"):
+        map_phecodes(release, cohort, events, tmp_path / "out", min_cases=1, min_controls=1)
+
+
+def test_events_for_people_outside_the_cohort_are_reported(tmp_path: Path, release: Path) -> None:
+    """The audit's event count is post-join, so a partial drop was invisible.
+
+    An unmapped rate of 0.0 means "everything that survived the join mapped", which is
+    not the same claim as "everything you supplied mapped" -- and only the pre-join
+    count distinguishes them.
+    """
+    cohort, events = tmp_path / "c.csv", tmp_path / "e.csv"
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Female"]])
+    write_csv(events, ["person_id", "code", "vocabulary"],
+              [["p1", "A01.1", "ICD10CM"]] + [[f"ghost{i}", "A01.1", "ICD10CM"] for i in range(9)])
+    out = tmp_path / "out"
+    map_phecodes(release, cohort, events, out, min_cases=1, min_controls=1)
+
+    audit = json.loads((out / "audit.json").read_text())
+    assert audit["events_in_file"] == 10
+    assert audit["events_for_unknown_people"] == 9
+    assert audit["events"] == 1, "post-join count should reflect only cohort members"
+    assert audit["unmapped_rate"] == 0.0, "the surviving event maps, which is the trap"

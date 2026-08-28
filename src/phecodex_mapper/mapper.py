@@ -89,8 +89,16 @@ def validate_cohort_and_events(con, cohort_src: str, event_src: str) -> dict:
             f"{event_types['person_id']}. Mixing text and numeric identifiers across the two files "
             "makes the join depend on type coercion. Export both as the same type.")
 
+    # Join on CAST(... AS VARCHAR), exactly as the pipeline does below -- not on the raw
+    # types. Joining raw let DuckDB coerce, so an INTEGER cohort against a DOUBLE events
+    # column matched here (1 = 1.0) while the pipeline compared '1' against '1.0' and
+    # matched nothing. The run then completed reporting 0 events, 0 unmapped and a 0.0
+    # unmapped rate -- every event silently discarded, and this guard, which exists to
+    # catch precisely that, saw a clean join. A check must use the semantics of the
+    # thing it is checking or it is not checking it.
     unknown_people = con.execute(
-        f"SELECT count(*) FROM {event_src} e LEFT JOIN {cohort_src} c USING (person_id)"
+        f"SELECT count(*) FROM {event_src} e LEFT JOIN {cohort_src} c"
+        f" ON CAST(e.person_id AS VARCHAR) = CAST(c.person_id AS VARCHAR)"
         f" WHERE c.person_id IS NULL").fetchone()[0]
     # Events for people outside the cohort are legitimately dropped -- but if *every*
     # event is dropped the two files do not describe the same population, and the run
@@ -451,7 +459,7 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     con = connect(); cohort_src = relation_for(cohort); event_src = relation_for(events)
     # Applied here, not only in workflow.preflight, so the `map-phecodes` subcommand
     # gets the same guarantees as the documented `run` workflow.
-    validate_cohort_and_events(con, cohort_src, event_src)
+    input_stats = validate_cohort_and_events(con, cohort_src, event_src)
     # validate_cohort_and_events guarantees person_id/sex on the cohort and
     # person_id/code/vocabulary on the events, so the duplicate column checks that
     # used to sit here (with their own divergent wording) are gone. The `sex` column
@@ -586,7 +594,19 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
 
     matrix_info = _write_phenotype_matrix(con, release, output, has_sex)
 
+    # POST-join: events for people outside the cohort are already gone by here. Reporting
+    # only this number meant a run that dropped events described itself as having had
+    # fewer events, so a partial population mismatch was invisible and an unmapped rate
+    # of 0.0 could mean "everything mapped" or "nothing survived the join".
     total = con.execute("SELECT count(*) FROM normalized_events").fetchone()[0]
+    events_in_file = input_stats["event_rows"]
+    dropped_unknown = input_stats["events_for_unknown_people"]
+    if dropped_unknown and events_in_file and dropped_unknown / events_in_file > 0.05:
+        print(f"phecodex-map: warning: {dropped_unknown:,} of {events_in_file:,} event rows "
+              f"({dropped_unknown / events_in_file:.1%}) are for person_ids that are not in the "
+              f"cohort and were dropped before mapping. Every count below describes the "
+              f"{total:,} events that remained. Check the two files cover the same population.",
+              file=sys.stderr)
     unmapped = con.execute("SELECT count(*) FROM unmapped_events").fetchone()[0]
     rate = unmapped / total if total else 0
     # Per-vocabulary, not just overall. A whole vocabulary mapping badly is a
@@ -647,7 +667,12 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
              "analysis_timezone": ANALYSIS_TIMEZONE,
              "min_cases": min_cases, "min_controls": min_controls, "exclusion_version": exclusion_version,
              "exclude_phenotypes": None if not exclude_phenotypes else {"file": str(exclude_phenotypes), **exclusion_summary},
-             "events": total, "unmapped_events": unmapped, "unmapped_rate": rate,
+             # events is POST-join; events_in_file is what was supplied. They differ when
+             # the events file covers people outside the cohort, and the unmapped rate is
+             # computed against the post-join number, so both are needed to read it.
+             "events": total, "events_in_file": events_in_file,
+             "events_for_unknown_people": dropped_unknown,
+             "unmapped_events": unmapped, "unmapped_rate": rate,
              "unmapped_by_vocabulary": by_vocabulary,
              "mapping_policy": "exact-match-against-published-map",
              # Every field here is derived. release_has_sex_metadata=false means NO
