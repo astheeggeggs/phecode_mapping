@@ -55,7 +55,8 @@ def main() -> None:
     build.add_argument("--recover-unmapped", action="store_true",
                         help="Add ICD codes the published PhecodeX map omits but this release can "
                              "justify -- either the same code carries phecodes under another "
-                             "vocabulary, or it maps to a SNOMED concept the bridge accepted. "
+                             "vocabulary of the same ICD generation (the ICD-9/ICD-10 boundary "
+                             "is never crossed), or it maps to a SNOMED concept the bridge accepted. "
                              "Recovers codes PhecodeX's sparse WHO map lacks and codes WHO has "
                              "retired (e.g. I84.x haemorrhoids, reclassified to K64.x). Requires "
                              "--athena-dir. Codes whose two routes disagree are skipped unless "

@@ -205,8 +205,19 @@ Two independent routes supply evidence. Nothing is inferred from code structure:
 
 | route | evidence |
 |---|---|
-| `cross_vocabulary` | the same code carries phecodes under another vocabulary in this release |
+| `cross_vocabulary` | the same code carries phecodes under another vocabulary **of the same ICD generation** in this release |
 | `snomed_bridge` | the code maps to a SNOMED concept the bridge accepted, which means every source ICD code for that concept agreed |
+
+The `cross_vocabulary` route never crosses the ICD-9/ICD-10 boundary. The two
+generations reuse the same code *strings* for unrelated diseases, so a bare string
+match across them is not "the same code": ICD-9-CM `V09.0` is a penicillin-resistant
+infection while WHO ICD-10 `V09.0` is a pedestrian struck in a nontraffic accident,
+and ICD-9-CM `E888.9` is an unspecified fall while ICD-10-CM `E88.89` is a metabolic
+disorder. The collision is systematic rather than incidental — ICD-9's `E` chapter
+is external causes against ICD-10's endocrine/metabolic, and ICD-9's `V` chapter is
+health status against ICD-10's transport accidents. Recovery is therefore confined
+to `ICD10` ↔ `ICD10CM`, which is the route's purpose; `ICD9CM` has no sibling here
+and takes no cross-vocabulary evidence.
 
 Where both routes fire and agree, or only one fires, the row is added. Where they
 **disagree the code is skipped** and named on stderr, unless
@@ -225,13 +236,14 @@ the reviewed verdicts for this release: 32 conflicts, 31 resolved to the
 cross-vocabulary assignment and one (`M79.66`) to the SNOMED route, because the
 cross-vocabulary option there is the upstream defect described below.
 
-Measured on the full Athena extract with those verdicts: **2,121 codes (4,757 rows)
+Measured on the full Athena extract with those verdicts: **1,938 codes (4,219 rows)
 added, 0 conflicts left unresolved**, taking the WHO ICD-10 side of the map from
-8,560 distinct codes to 10,487.
+8,560 distinct codes to 10,405.
 
 The effect on phenotypes is not uniform — it concentrates on traits the retired
 codes had quietly gutted. On a 336,304-person cohort, 246 phecodes gained cases and
-none lost any:
+none lost any (measured before the ICD-9/ICD-10 guard above was added; of the traits
+listed here only `MS_745` is touched by it, losing 2 of its map rows):
 
 | phecode | before | after | |
 |---|---|---|---|

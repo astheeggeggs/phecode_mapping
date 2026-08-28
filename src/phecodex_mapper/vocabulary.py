@@ -41,6 +41,9 @@ def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
     release is used -- nothing is inferred from code structure:
 
       cross_vocabulary  the same code carries phecodes under another vocabulary
+                        of the SAME ICD generation (ICD-10 <-> ICD-10-CM); the
+                        ICD-9/ICD-10 boundary is never crossed, because the two
+                        reuse code strings for unrelated diseases
       snomed_bridge     the code maps to a SNOMED concept the bridge already
                         accepted, which means every source ICD code for that
                         concept agreed on the phecode (see the bridge above)
@@ -68,6 +71,17 @@ def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
         SELECT c.normalized_code, c.vocabulary, list_sort(list(DISTINCT m.phecode)) AS phecodes
         FROM recovery_candidates c JOIN icd_map m
           ON m.normalized_code = c.normalized_code AND m.vocabulary <> c.vocabulary
+          -- ...but only within one ICD generation. ICD-9 and ICD-10 reuse the same
+          -- code STRINGS for unrelated diseases, so a bare string match across the
+          -- boundary is not "the same code": ICD-9-CM V09.0 is penicillin-resistant
+          -- infection while WHO ICD-10 V09.0 is a pedestrian hit in a nontraffic
+          -- accident, and ICD-9-CM E888.9 is an unspecified fall while ICD-10-CM
+          -- E88.89 is a metabolic disorder. Without this guard the E (ICD-9 external
+          -- cause vs ICD-10 endocrine) and V (ICD-9 health status vs ICD-10 transport)
+          -- chapters collide wholesale. ICD10 <-> ICD10CM, the route's actual purpose,
+          -- is unaffected; ICD9CM has no sibling here, so it gets no cross evidence.
+          AND (CASE WHEN m.vocabulary = 'ICD9CM' THEN 9 ELSE 10 END)
+            = (CASE WHEN c.vocabulary = 'ICD9CM' THEN 9 ELSE 10 END)
         GROUP BY 1, 2
     """)
     con.execute("""

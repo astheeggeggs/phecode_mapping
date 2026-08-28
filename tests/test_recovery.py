@@ -4,7 +4,7 @@ PhecodeX's WHO ICD-10 map holds 8,560 distinct codes against ICD-10-CM's 55,338,
 and WHO retires codes the map never catches up with -- I84.x haemorrhoids was
 reclassified to K64.x, so a cohort spanning 2000-2022 loses every older
 haemorrhoid episode silently. Measured on a 2.6M-event UK Biobank extract,
-recovery took unmapped from 23.74% to 20.25%: 90,804 events across 1,046 codes.
+recovery took unmapped from 23.74% to 20.26%: 90,503 events across 1,007 codes.
 
 Two routes supply evidence, and only evidence already inside the release:
 
@@ -198,3 +198,42 @@ def test_recovery_requires_athena(tmp_path: Path, fixture) -> None:
     source, _ = fixture
     with pytest.raises(ValueError, match="requires --athena-dir"):
         build_vocabulary(source, None, tmp_path / "rel_no", None, recover_unmapped=True)
+
+
+def test_cross_vocabulary_never_crosses_the_icd9_icd10_boundary(tmp_path: Path) -> None:
+    """A code string shared by ICD-9 and ICD-10 is NOT the same code.
+
+    The two generations reuse strings for unrelated diseases, and the collision is
+    systematic rather than incidental: ICD-9's E chapter is external causes while
+    ICD-10's is endocrine/metabolic, and ICD-9's V chapter is health status while
+    ICD-10's is transport accidents. Matching on the bare string put 265 codes into
+    a shipped release with the phecodes of an unrelated disease -- a pedestrian
+    struck by a car recovered as `ID_097` drug-resistant infection.
+
+    The same-era pair in this fixture is the positive control: if the guard is
+    written too broadly it takes that with it, and the route stops doing its job.
+    """
+    source = tmp_path / "eras.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [
+        ["ID_097", "V09.0", "ICD9CM"],    # ICD-9: infection resistant to penicillins
+        ["EM_252", "E88.89", "ICD10CM"],  # ICD-10: other specified metabolic disorders
+        ["CV_003", "A01.1", "ICD10CM"],   # same-era donor for the positive control
+    ])
+    athena = _athena(tmp_path / "athena_era", concepts=[
+        [1, "V09.0", "ICD9CM", "Condition", "", ""],
+        [2, "V09.0", "ICD10", "Condition", "", ""],    # pedestrian injured, unmapped
+        [3, "E88.89", "ICD10CM", "Condition", "", ""],
+        [4, "E888.9", "ICD9CM", "Condition", "", ""],  # unspecified fall, unmapped
+        [5, "A01.1", "ICD10CM", "Condition", "", ""],
+        [6, "A01.1", "ICD10", "Condition", "", ""],    # same code, same era, unmapped
+    ], relationships=[])
+    release = tmp_path / "era"
+    build_vocabulary(source, None, release, athena, recover_unmapped=True)
+    got = _map(release)
+
+    assert ("ICD10", "V090", "ID_097") not in got, \
+        "an ICD-10 transport-accident code took an ICD-9 infection phecode"
+    assert ("ICD9CM", "E8889", "EM_252") not in got, \
+        "an ICD-9 fall code took an ICD-10 metabolic phecode"
+    assert ("ICD10", "A011", "CV_003") in got, \
+        "the guard also blocked ICD10CM -> ICD10, which is the route's whole purpose"
