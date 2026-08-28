@@ -337,3 +337,24 @@ def test_the_docs_show_how_to_build_the_release_analysts_receive() -> None:
     assert builds, "README documents no build-vocabulary command"
     assert any("--icd-only" in b for b in builds), \
         "no documented build produces a release that package_distribution.py will accept"
+
+
+def test_the_bundle_ships_the_licence(tmp_path: Path) -> None:
+    """A permissive licence the recipient never receives grants them nothing."""
+    release = _icd_only_release(tmp_path, "lic")
+    bundle = tmp_path / "lic.tar.gz"
+    subprocess.run([sys.executable, str(ROOT / "scripts/package_distribution.py"),
+                    "--release", str(release), "--output", str(bundle)], check=True,
+                   capture_output=True, text=True)
+    with tarfile.open(bundle) as archive:
+        names = archive.getnames()
+        licence = archive.extractfile("phecodex-distribution/LICENSE").read().decode()
+    assert "phecodex-distribution/LICENSE" in names
+    assert "MIT License" in licence
+
+
+def test_the_repo_declares_a_licence() -> None:
+    """Without one the default is all-rights-reserved and no site may use this."""
+    text = (ROOT / "LICENSE").read_text()
+    assert "MIT License" in text and "Copyright (c)" in text
+    assert 'license = "MIT"' in (ROOT / "pyproject.toml").read_text()

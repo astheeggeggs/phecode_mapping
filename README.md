@@ -345,6 +345,28 @@ release, its manifest/checksum, documentation, and synthetic fixtures. Keep
 licensed vocabulary sources at the site that built the release. The repository
 is configured to ignore local releases, Athena files, and generated outputs.
 
+## Licence
+
+The code in this repository is released under the [MIT licence](LICENSE) — use,
+modify and redistribute it freely; the only condition is that the copyright notice
+travels with it.
+
+That licence covers **this tool**, not the data it maps. Two separate things ride
+along with a built release, and neither is ours to relicense:
+
+- **PhecodeX.** The mapping definitions come from the upstream
+  [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary),
+  which states no licence of its own. Use follows academic norms and the citation
+  below rather than an explicit grant. A release directory contains PhecodeX-derived
+  content, so redistributing one is not covered by the MIT licence above.
+- **OMOP/Athena.** Releases built with `--athena-dir` may embed Athena-derived
+  knowledge, which is separately licensed and must not be redistributed. Build shared
+  releases with `--icd-only`, and check
+  `recovery.assignments_resting_solely_on_athena_evidence` in the manifest.
+
+If you are redistributing a release rather than the code, take those two points to
+your data-access team first.
+
 ## Provenance and citation
 
 This tool does not define phenotypes. It applies the published **PhecodeX v1.1**
