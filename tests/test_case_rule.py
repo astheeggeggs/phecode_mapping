@@ -104,3 +104,96 @@ def test_a_case_is_never_downgraded_by_the_subthreshold_rule(tmp_path: Path, ful
         f" WHERE p.person_id IN ('a1','a2') AND p.phecode = 'GU_001'").fetchone()[0]
     assert overlap == 2
     assert _matrix(run, "GU_001")["a1"] == 1
+
+
+def test_two_dates_means_distinct_dates_not_two_events(tmp_path: Path) -> None:
+    """The rule is named for the semantics no test could see.
+
+    Dropping DISTINCT left the whole suite green, yet it is the documented
+    divergence from PheTK: PheTK counts mapped rows, so two codes in one visit
+    make a case; we require two calendar dates. A person with two events on the
+    SAME day is the only input that separates those two readings.
+    """
+    from phecodex_mapper.vocabulary import build_vocabulary
+    source = tmp_path / "m.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "123.4", "ICD9CM"]])
+    info = tmp_path / "i.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"], [["CV_003", "Both", "X", "Y"]])
+    release = tmp_path / "rel"
+    build_vocabulary(source, info, release, None)
+
+    cohort, events = tmp_path / "c.csv", tmp_path / "e.csv"
+    write_csv(cohort, ["person_id", "sex"],
+              [["same_day", "Female"], ["two_days", "Female"], ["ctrl", "Female"]])
+    write_csv(events, ["person_id", "code", "vocabulary", "event_date"], [
+        ["same_day", "123.4", "ICD9CM", "2020-01-01"],   # two events, ONE date
+        ["same_day", "123.4", "ICD9CM", "2020-01-01"],
+        ["two_days", "123.4", "ICD9CM", "2020-01-01"],   # two events, TWO dates
+        ["two_days", "123.4", "ICD9CM", "2020-06-01"],
+    ])
+    out = tmp_path / "run"
+    map_phecodes(release, cohort, events, out, case_rule="two-dates", min_cases=1, min_controls=1)
+    cases = {r[0] for r in duckdb.sql(
+        f"SELECT person_id FROM read_parquet('{out / 'person_phecodes.parquet'}')").fetchall()}
+    assert "two_days" in cases
+    assert "same_day" not in cases, "two events on one date satisfied a rule that says two dates"
+
+
+def test_two_dates_gives_the_same_answer_in_every_machine_timezone(tmp_path: Path) -> None:
+    """Property 7. A tz-aware event_date resolved through the machine's zone made a
+    person a case at one site and non-evaluable at another, on byte-identical inputs.
+
+    pyarrow writes TIMESTAMP WITH TIME ZONE for any tz-aware column, and DuckDB casts
+    it to DATE through its TimeZone setting, which defaults to the local zone. Two
+    events either side of midnight UTC are two dates in London and one in Los Angeles.
+    """
+    import os
+    import subprocess
+    import sys
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    source = tmp_path / "mtz.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "123.4", "ICD9CM"]])
+    info = tmp_path / "itz.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"], [["CV_003", "Both", "X", "Y"]])
+    release = tmp_path / "reltz"
+    build_vocabulary(source, info, release, None)
+    cohort = tmp_path / "ctz.csv"
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Female"]])
+    # 2020-01-01T23:00Z and 2020-01-02T01:00Z: two UTC dates, one Los Angeles date.
+    events = tmp_path / "etz.parquet"
+    pq.write_table(pa.table({
+        "person_id": ["p1", "p1", "p2", "p2"],
+        "code": ["123.4"] * 4,
+        "vocabulary": ["ICD9CM"] * 4,
+        "event_date": pa.array([1577919600_000000, 1577926800_000000,
+                                1577919600_000000, 1580598000_000000],
+                               type=pa.timestamp("us", tz="UTC")),
+    }), events)
+
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import sys, duckdb\n"
+        "from pathlib import Path\n"
+        "from phecodex_mapper.mapper import map_phecodes\n"
+        "release, cohort, events, out = (Path(a) for a in sys.argv[1:5])\n"
+        "map_phecodes(release, cohort, events, out, case_rule='two-dates',"
+        " min_cases=1, min_controls=1)\n"
+        "rows = duckdb.sql(\"SELECT phecode, case_count FROM read_parquet('\""
+        " + str(out / 'phecode_counts.parquet') + \"')\").fetchall()\n"
+        "print(rows)\n"
+    )
+    results = {}
+    for zone in ("UTC", "America/Los_Angeles", "Australia/Sydney"):
+        env = {**os.environ, "TZ": zone,
+               "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+        out = tmp_path / f"o_{zone.replace('/', '_')}"
+        proc = subprocess.run([sys.executable, str(child), str(release), str(cohort),
+                               str(events), str(out)],
+                              capture_output=True, text=True, env=env)
+        assert proc.returncode == 0, proc.stderr
+        results[zone] = proc.stdout.strip()
+    assert len(set(results.values())) == 1, f"case set depends on the machine timezone: {results}"
+    assert "2" in results["UTC"], f"fixture no longer produces two distinct UTC dates: {results}"

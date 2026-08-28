@@ -7,7 +7,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from .io import checksum, connect, quote, relation_for
+from .io import ANALYSIS_TIMEZONE, checksum, connect, quote, relation_for
 
 
 def _columns(con, source: str) -> set[str]:
@@ -635,6 +635,9 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
                   f"-- UK Biobank is WHO ICD10, not ICD10CM -- and re-run; do not relabel on the "
                   f"unmapped rate alone.", file=sys.stderr)
     audit = {"created_at_utc": dt.datetime.now(dt.UTC).isoformat(), "release": str(release), "case_rule": case_rule,
+             # Pinned, not observed: two sites must resolve a timestamp to the same
+             # calendar date or two-dates gives them different case sets. See io.connect.
+             "analysis_timezone": ANALYSIS_TIMEZONE,
              "min_cases": min_cases, "min_controls": min_controls, "exclusion_version": exclusion_version,
              "exclude_phenotypes": None if not exclude_phenotypes else {"file": str(exclude_phenotypes), **exclusion_summary},
              "events": total, "unmapped_events": unmapped, "unmapped_rate": rate,
