@@ -131,3 +131,43 @@ def test_audit_sex_fields_are_derived_not_constant(tmp_path: Path) -> None:
     assert a["sex"]["release_has_sex_metadata"] != b["sex"]["release_has_sex_metadata"]
     assert a["sex"]["n_restricted_phecodes"] == 1
     assert b["sex"]["n_restricted_phecodes"] == 0
+
+
+def test_a_phecode_info_identifier_that_only_nearly_matches_is_refused(tmp_path: Path) -> None:
+    """A case or whitespace difference silently deletes a sex restriction.
+
+    phecode_sex is joined on the exact identifier, so 'gu_001' against the map's
+    'GU_001' contributes nothing: the phecode becomes unrestricted, opposite-sex
+    people are scored as ordinary controls (0) instead of non-evaluable (blank), and
+    audit.json still reports n_restricted_phecodes = 1 -- claiming a restriction that
+    was never applied. Measured before the fix: males went from blank to 0.
+
+    Info legitimately carries phecodes the map does not, so the check is narrow: an
+    info phecode that matches a map phecode ONLY after normalising is a formatting
+    mismatch, not an extra row.
+    """
+    source = tmp_path / "m.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["GU_001", "A01.1", "ICD10CM"]])
+    for index, bad in enumerate(("gu_001", " GU_001", "GU_001 ")):
+        info = tmp_path / f"i_{index}.csv"
+        write_csv(info, ["phecode", "sex", "phecode_string", "category"],
+                  [[bad, "Female", "Endometriosis", "Genitourinary"]])
+        with pytest.raises(ValueError, match="differ from the map.s by case or whitespace"):
+            build_vocabulary(source, info, tmp_path / f"rel_{index}", None)
+
+
+def test_info_may_still_carry_phecodes_the_map_does_not(tmp_path: Path) -> None:
+    """Negative control: the published info file covers the whole phenome.
+
+    Refusing extra rows would reject every real release, which would make the guard
+    above useless in practice.
+    """
+    source = tmp_path / "m2.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["GU_001", "A01.1", "ICD10CM"]])
+    info = tmp_path / "i2.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"],
+              [["GU_001", "Female", "Endometriosis", "Genitourinary"],
+               ["ZZ_999", "Male", "Never mapped", "Other"]])
+    release = tmp_path / "rel_extra"
+    build_vocabulary(source, info, release, None)
+    assert (release / "phecode_info.parquet").is_file()

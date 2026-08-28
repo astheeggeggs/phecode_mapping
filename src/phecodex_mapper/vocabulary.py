@@ -296,6 +296,27 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
             bad_sex = con.execute(f"SELECT DISTINCT sex FROM {info_source} WHERE upper(trim(sex)) NOT IN ('BOTH', 'MALE', 'FEMALE')").fetchall()
             if bad_sex:
                 raise ValueError(f"Phecode info sex must be Both, Male, or Female, got: {[r[0] for r in bad_sex]}")
+        # A phecode_info identifier that differs from the map's by case or whitespace
+        # joins nothing at run time, so the phecode silently loses its sex restriction
+        # and opposite-sex people become ordinary controls (0) instead of non-evaluable
+        # -- while audit.json still reports it as restricted. Info legitimately carries
+        # phecodes the map does not (the published info file covers the whole phenome),
+        # so the signal is narrower: an info phecode that matches a map phecode ONLY
+        # after normalising is unambiguously a formatting mismatch, not an extra row.
+        if "phecode" in info_columns:
+            near_misses = con.execute(f"""
+                SELECT DISTINCT i.phecode, m.phecode FROM {info_source} i
+                JOIN icd_map m ON upper(trim(i.phecode)) = upper(trim(m.phecode))
+                                AND i.phecode <> m.phecode
+                ORDER BY 1 LIMIT 10
+            """).fetchall()
+            if near_misses:
+                raise ValueError(
+                    f"phecode_info identifiers differ from the map's by case or whitespace: "
+                    f"{[(a, b) for a, b in near_misses]}. These join nothing at run time, so the "
+                    f"phecode loses its sex restriction and opposite-sex people are scored as "
+                    f"controls rather than non-evaluable. Fix the info file so the identifiers "
+                    f"match the map exactly.")
         con.execute(f"COPY (SELECT * FROM {info_source}) TO '{quote(output / 'phecode_info.parquet')}' (FORMAT PARQUET)")
         con.execute(f"COPY (SELECT * FROM {info_source}) TO '{quote(output / 'phecode_info.csv')}' (HEADER, DELIMITER ',')")
         if "phecode" in info_columns:
