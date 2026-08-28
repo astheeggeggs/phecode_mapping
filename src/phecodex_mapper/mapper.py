@@ -680,7 +680,24 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
               "instead of NA. Add a 'sex' column (values 'Male'/'Female') to --cohort to fix this.",
               file=sys.stderr)
 
+    dropped_reason = None
     if not retained_phecodes:
+        # A matrix with no columns is a successful run that produced nothing usable. It
+        # is not obviously distinguishable from a broken install, and the JSON summary
+        # says only "matrix_columns: 0" -- so say why, with the numbers that explain it.
+        # The documented example run does exactly this: 2 people against min_cases=200.
+        with_cases, best_cases, best_controls = con.execute(
+            f"SELECT count(*) FILTER (WHERE case_count > 0), coalesce(max(case_count), 0),"
+            f" coalesce(max(control_count_after_exclusions), 0) FROM {counts_table}").fetchone()
+        dropped_reason = {"phecodes_with_at_least_one_case": with_cases,
+                          "largest_case_count": best_cases,
+                          "largest_control_count_after_exclusions": best_controls}
+        print(f"phecodex-map: warning: no phecode met the retention thresholds, so the phenotype "
+              f"matrix has no columns. {with_cases:,} phecode(s) had at least one case; the largest "
+              f"had {best_cases:,} case(s) and {best_controls:,} control(s) against --min-cases and "
+              f"--min-controls. This is a threshold outcome, not a failure -- lower them if the "
+              f"cohort is genuinely this small (the bundled examples/ files are 2 people).",
+              file=sys.stderr)
         con.execute(f"CREATE TABLE phenotype_matrix AS SELECT person_id FROM cohort ORDER BY person_id")
     else:
         # Deliberately avoids `cohort CROSS JOIN retained_phecodes` (and DuckDB's PIVOT over
@@ -764,4 +781,6 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
         "cohort_has_usable_sex": has_sex,
         "sex_restricted_retained_phecodes": len(sex_restricted_retained),
         "sex_restricted_phecodes_treated_as_unrestricted": 0 if has_sex else len(sex_restricted_retained),
+        # Present only when the matrix came out empty; explains which threshold bit.
+        "no_columns_retained_because": dropped_reason,
     }

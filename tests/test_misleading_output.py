@@ -179,3 +179,46 @@ def test_a_run_whose_release_lacks_sex_metadata_IS_annotated(tmp_path: Path) -> 
         rows = list(csv.DictReader(fh))
     annotated = [r for r in rows if "local_denominator_not_sex_restricted" in r["notes"]]
     assert annotated, "a genuinely sex-blind denominator was not annotated"
+
+
+# ---------------------------------------------------------------------------
+# An empty matrix is a successful run that produced nothing usable
+# ---------------------------------------------------------------------------
+
+def test_an_empty_matrix_says_why_it_is_empty(tmp_path: Path, capsys) -> None:
+    """The documented example run does exactly this: 2 people against min_cases=200.
+
+    It exits 0, writes a matrix with only a person_id column, and reports
+    "matrix_columns: 0" with no reason. That is indistinguishable from a broken
+    install to someone running the tool for the first time, and the bundled
+    examples/ files guarantee every new analyst meets it.
+    """
+    release = _release(tmp_path, "empty", with_sex=True)
+    cohort, events = tmp_path / "ce.csv", tmp_path / "ee.csv"
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Female"]])
+    write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "A01.1", "ICD10CM"]])
+    out = tmp_path / "empty_run"
+    map_phecodes(release, cohort, events, out, min_cases=200, min_controls=200)
+
+    err = capsys.readouterr().err
+    assert "no phecode met the retention thresholds" in err
+    assert "--min-cases" in err, "the warning must name the knob that caused it"
+    reason = json.loads((out / "audit.json").read_text())["phenotype_matrix"]["no_columns_retained_because"]
+    assert reason["phecodes_with_at_least_one_case"] == 1
+    assert reason["largest_case_count"] == 1
+
+
+def test_a_run_that_retains_columns_does_not_warn(tmp_path: Path, capsys) -> None:
+    """Negative control: a warning printed unconditionally teaches analysts to ignore it."""
+    release = _release(tmp_path, "full", with_sex=True)
+    cohort, events = tmp_path / "cf.csv", tmp_path / "ef.csv"
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Female"], ["p3", "Female"]])
+    write_csv(events, ["person_id", "code", "vocabulary"],
+              [["p1", "A01.1", "ICD10CM"], ["p2", "A01.1", "ICD10CM"]])
+    out = tmp_path / "full_run"
+    map_phecodes(release, cohort, events, out, min_cases=1, min_controls=1)
+
+    assert "no phecode met the retention thresholds" not in capsys.readouterr().err
+    audit = json.loads((out / "audit.json").read_text())
+    assert audit["phenotype_matrix"]["n_columns"] >= 1
+    assert audit["phenotype_matrix"]["no_columns_retained_because"] is None
