@@ -189,6 +189,46 @@ curated, versioned supplement to the map — explicit and auditable — rather t
 run-time inference. Codes with no entry are reported in `unmapped_events.csv`;
 review that file rather than assuming a low unmapped rate means good coverage.
 
+### Recovering codes the published map omits
+
+`build-vocabulary --recover-unmapped` adds ICD codes PhecodeX does not map but
+which this release can justify from evidence it already contains. It is opt-in;
+without it the map is exactly what the published files hold.
+
+Two things motivate it. PhecodeX's WHO ICD-10 map is roughly six times coarser
+than its ICD-10-CM map (8,560 distinct codes against 55,338), and WHO retires
+codes the map never catches up with — `I84.x` haemorrhoids was reclassified to
+`K64.x`, so a cohort spanning 2000–2022 loses every older haemorrhoid episode with
+no signal at all.
+
+Two independent routes supply evidence. Nothing is inferred from code structure:
+
+| route | evidence |
+|---|---|
+| `cross_vocabulary` | the same code carries phecodes under another vocabulary in this release |
+| `snomed_bridge` | the code maps to a SNOMED concept the bridge accepted, which means every source ICD code for that concept agreed |
+
+Where both routes fire and agree, or only one fires, the row is added. Where they
+**disagree the code is skipped** and named on stderr, unless
+`--recovery-adjudication` resolves it — guessing between two contradicting sources
+is the inference this tool refuses to make elsewhere. That file needs `icd_code`
+and `adjudication_A_or_B`, where `A` selects the cross-vocabulary assignment and
+`B` the SNOMED route.
+
+Everything added is listed in `recovered_codes.csv` with its route, and summarised
+under `recovery` in `manifest.json` along with the adjudication file's checksum.
+Recovery runs *after* the SNOMED bridge and never feeds back into it, so it cannot
+bootstrap itself, and it is purely additive — no published assignment is rewritten.
+
+Measured on the full Athena extract with 20 adjudicated verdicts: 2,109 codes
+(4,733 rows) added, 12 conflicts skipped as unadjudicated. On a 2.6M-event UK
+Biobank extract that moved unmapped from 23.74% to 20.25% — 90,804 events across
+1,046 codes.
+
+Doing this at build time rather than at mapping time is deliberate. A federated
+analysis needs every site to make the same decision once; a run-time fallback
+would let two sites disagree silently and would break the exact-match policy above.
+
 ### Known upstream defect: limb-pain codes in the ICD-10-CM map
 
 PhecodeX's ICD-10-CM map assigns the **thigh and lower-leg** pain codes to the

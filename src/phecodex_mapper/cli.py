@@ -52,6 +52,19 @@ def main() -> None:
                         help="Optional directory with an authorized Athena/OMOP vocabulary "
                              "extract (CONCEPT.csv, CONCEPT_RELATIONSHIP.csv) used to bridge "
                              "SNOMED codes to the ICD map. Never commit Athena data or credentials.")
+    build.add_argument("--recover-unmapped", action="store_true",
+                        help="Add ICD codes the published PhecodeX map omits but this release can "
+                             "justify -- either the same code carries phecodes under another "
+                             "vocabulary, or it maps to a SNOMED concept the bridge accepted. "
+                             "Recovers codes PhecodeX's sparse WHO map lacks and codes WHO has "
+                             "retired (e.g. I84.x haemorrhoids, reclassified to K64.x). Requires "
+                             "--athena-dir. Codes whose two routes disagree are skipped unless "
+                             "--recovery-adjudication resolves them; every added row is listed in "
+                             "recovered_codes.csv and summarised in the manifest.")
+    build.add_argument("--recovery-adjudication", type=Path,
+                        help="CSV resolving codes whose recovery routes disagree. Requires columns "
+                             "icd_code and adjudication_A_or_B, where A selects the cross-vocabulary "
+                             "assignment and B the SNOMED route.")
     build.add_argument("--output", required=True, type=Path,
                         help="Release directory to create. Must not already exist.")
 
@@ -122,7 +135,8 @@ def main() -> None:
                 audit = run_workflow(release=args.release, cohort=args.cohort, events=args.events, output=args.output, case_rule=args.case_rule, exclusions=args.control_exclusions, exclude_phenotypes=exclude_phenotypes, min_cases=args.min_cases, min_controls=args.min_controls, max_unmapped_rate=args.max_unmapped_rate)
                 print(json.dumps({"output": str(args.output), "mapping_policy": audit["mapping_policy"], "matrix_columns": audit.get("phenotype_matrix", {}).get("n_columns")}, indent=2))
         elif args.command == "build-vocabulary":
-            build_vocabulary(args.phecodex_map, args.phecodex_info, args.output, args.athena_dir)
+            build_vocabulary(args.phecodex_map, args.phecodex_info, args.output, args.athena_dir,
+                             args.recover_unmapped, args.recovery_adjudication)
         elif args.command == "map-phecodes":
             map_phecodes(args.release, args.cohort, args.events, args.output, args.case_rule, args.control_exclusions, args.min_cases, args.min_controls, args.max_unmapped_rate, args.exclude_phenotypes)
         else:

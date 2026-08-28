@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -26,7 +27,149 @@ def _write_xlsx(path: Path, sheets: dict[str, list[tuple[list[str], list[tuple]]
     book.save(path)
 
 
-def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None, output: Path, athena_dir: Path | None = None) -> None:
+def _recover_unmapped_codes(con, output: Path, athena_dir: Path | None,
+                            adjudication: Path | None) -> dict:
+    """Add ICD codes the published map omits but the release itself can justify.
+
+    PhecodeX's WHO ICD-10 map is roughly six times coarser than its ICD-10-CM map
+    (8,560 distinct codes against 55,338), and WHO retires codes the map never
+    catches up with -- I84.x haemorrhoids was reclassified to K64.x, so a cohort
+    spanning 2000-2022 loses every older haemorrhoid episode silently. Neither is
+    a curation decision this tool should honour by dropping the events.
+
+    Two independent routes supply evidence, and only evidence already inside the
+    release is used -- nothing is inferred from code structure:
+
+      cross_vocabulary  the same code carries phecodes under another vocabulary
+      snomed_bridge     the code maps to a SNOMED concept the bridge already
+                        accepted, which means every source ICD code for that
+                        concept agreed on the phecode (see the bridge above)
+
+    Where both routes fire and agree, the row is added. Where only one fires, it
+    is added. Where they DISAGREE the code is skipped unless an adjudication file
+    resolves it, because guessing between two sources that contradict each other
+    is exactly the inference this tool refuses to make elsewhere.
+
+    This runs AFTER the SNOMED bridge and never feeds back into it; the bridge is
+    built from the published map alone, so recovery cannot bootstrap itself.
+    """
+    con.execute("""
+        CREATE TABLE recovery_candidates AS
+        SELECT DISTINCT regexp_replace(upper(concept_code), '[.\\s-]', '', 'g') AS normalized_code,
+               concept_code, vocabulary_id AS vocabulary, concept_id
+        FROM concept
+        WHERE vocabulary_id IN ('ICD9CM', 'ICD10CM', 'ICD10')
+          AND NOT EXISTS (SELECT 1 FROM icd_map m
+                          WHERE m.normalized_code = regexp_replace(upper(concept_code), '[.\\s-]', '', 'g')
+                            AND m.vocabulary = vocabulary_id)
+    """)
+    con.execute("""
+        CREATE TABLE recovery_cross AS
+        SELECT c.normalized_code, c.vocabulary, list_sort(list(DISTINCT m.phecode)) AS phecodes
+        FROM recovery_candidates c JOIN icd_map m
+          ON m.normalized_code = c.normalized_code AND m.vocabulary <> c.vocabulary
+        GROUP BY 1, 2
+    """)
+    con.execute("""
+        CREATE TABLE recovery_snomed AS
+        SELECT c.normalized_code, c.vocabulary, list_sort(list(DISTINCT s.phecode)) AS phecodes
+        FROM recovery_candidates c
+        JOIN relationship r ON r.concept_id_1 = c.concept_id
+          AND r.relationship_id = 'Maps to' AND r.invalid_reason IS NULL
+        JOIN concept sc ON sc.concept_id = r.concept_id_2 AND sc.vocabulary_id = 'SNOMED'
+        JOIN snomed_map s ON s.source_code = sc.concept_code
+        GROUP BY 1, 2
+    """)
+    # 'A' selects the cross-vocabulary assignment, 'B' the SNOMED route -- the same
+    # labels the adjudication report uses, so a reviewed file can be fed straight back.
+    con.execute("CREATE TABLE recovery_adjudicated(normalized_code VARCHAR, choice VARCHAR)")
+    adjudication_meta = None
+    if adjudication:
+        adj = relation_for(adjudication)
+        adj_columns = _columns(con, adj)
+        needed = {"icd_code", "adjudication_A_or_B"}
+        if needed - adj_columns:
+            raise ValueError(f"--recovery-adjudication missing columns: {sorted(needed - adj_columns)}")
+        con.execute(f"""
+            INSERT INTO recovery_adjudicated
+            SELECT regexp_replace(upper(icd_code), '[.\\s-]', '', 'g'),
+                   upper(trim(CAST(adjudication_A_or_B AS VARCHAR)))
+            FROM {adj} WHERE adjudication_A_or_B IS NOT NULL
+              AND upper(trim(CAST(adjudication_A_or_B AS VARCHAR))) IN ('A', 'B')
+        """)
+        adjudication_meta = {"path": str(adjudication), "sha256": checksum(adjudication),
+                             "verdicts": con.execute("SELECT count(*) FROM recovery_adjudicated").fetchone()[0]}
+    con.execute("""
+        CREATE TABLE recovery_resolved AS
+        SELECT coalesce(x.normalized_code, s.normalized_code) AS normalized_code,
+               coalesce(x.vocabulary, s.vocabulary) AS vocabulary,
+               CASE
+                 WHEN x.phecodes IS NOT NULL AND s.phecodes IS NOT NULL AND x.phecodes = s.phecodes
+                   THEN 'both_routes_agree'
+                 WHEN x.phecodes IS NOT NULL AND s.phecodes IS NOT NULL AND a.choice = 'A'
+                   THEN 'adjudicated_cross_vocabulary'
+                 WHEN x.phecodes IS NOT NULL AND s.phecodes IS NOT NULL AND a.choice = 'B'
+                   THEN 'adjudicated_snomed_bridge'
+                 WHEN x.phecodes IS NOT NULL AND s.phecodes IS NOT NULL
+                   THEN 'skipped_unresolved_disagreement'
+                 WHEN x.phecodes IS NOT NULL THEN 'cross_vocabulary'
+                 ELSE 'snomed_bridge'
+               END AS route,
+               CASE
+                 WHEN x.phecodes IS NOT NULL AND s.phecodes IS NOT NULL AND a.choice = 'B' THEN s.phecodes
+                 WHEN x.phecodes IS NOT NULL THEN x.phecodes
+                 ELSE s.phecodes
+               END AS phecodes
+        FROM recovery_cross x
+        FULL OUTER JOIN recovery_snomed s
+          ON s.normalized_code = x.normalized_code AND s.vocabulary = x.vocabulary
+        LEFT JOIN recovery_adjudicated a
+          ON a.normalized_code = coalesce(x.normalized_code, s.normalized_code)
+    """)
+    con.execute("""
+        CREATE TABLE recovered_rows AS
+        SELECT unnest(r.phecodes) AS phecode, c.concept_code AS source_code,
+               r.vocabulary, r.normalized_code, r.route
+        FROM recovery_resolved r
+        JOIN recovery_candidates c
+          ON c.normalized_code = r.normalized_code AND c.vocabulary = r.vocabulary
+        WHERE r.route <> 'skipped_unresolved_disagreement'
+    """)
+    con.execute("""
+        INSERT INTO icd_map
+        SELECT DISTINCT phecode, source_code, vocabulary, normalized_code FROM recovered_rows
+    """)
+    con.execute(f"""
+        COPY (SELECT normalized_code, source_code, vocabulary, phecode, route
+              FROM recovered_rows ORDER BY vocabulary, normalized_code, phecode)
+        TO '{quote(output / 'recovered_codes.csv')}' (HEADER, DELIMITER ',')
+    """)
+    by_route = dict(con.execute(
+        "SELECT route, count(DISTINCT normalized_code) FROM recovered_rows GROUP BY 1 ORDER BY 1").fetchall())
+    skipped = con.execute(
+        "SELECT count(*) FROM recovery_resolved WHERE route = 'skipped_unresolved_disagreement'").fetchone()[0]
+    unresolved = [r[0] for r in con.execute(
+        "SELECT normalized_code FROM recovery_resolved WHERE route = 'skipped_unresolved_disagreement'"
+        " ORDER BY normalized_code LIMIT 25").fetchall()]
+    if skipped:
+        print(f"phecodex-build: warning: {skipped} code(s) have conflicting recovery routes and were "
+              f"NOT added; supply --recovery-adjudication to resolve them. First few: {unresolved[:10]}",
+              file=sys.stderr)
+    return {
+        "rule": "codes absent from the published map are added only where the release itself supplies "
+                "evidence -- another vocabulary's assignment, or a SNOMED concept the bridge accepted; "
+                "conflicting routes are skipped unless adjudicated",
+        "rows_added": con.execute("SELECT count(*) FROM recovered_rows").fetchone()[0],
+        "codes_added": con.execute("SELECT count(DISTINCT normalized_code) FROM recovered_rows").fetchone()[0],
+        "codes_added_by_route": by_route,
+        "codes_skipped_unresolved_disagreement": skipped,
+        "adjudication": adjudication_meta,
+    }
+
+
+def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None, output: Path,
+                     athena_dir: Path | None = None, recover_unmapped: bool = False,
+                     recovery_adjudication: Path | None = None) -> None:
     if output.exists():
         raise FileExistsError(f"Output directory already exists: {output}. Remove it or choose a new --output path.")
     output.mkdir(parents=True)
@@ -71,8 +214,7 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         FROM source_map
         WHERE upper(vocabulary_id) IN ('ICD9CM', 'ICD10CM', 'ICD10')
     """)
-    con.execute(f"COPY icd_map TO '{quote(output / 'icd_map.parquet')}' (FORMAT PARQUET)")
-    con.execute(f"COPY icd_map TO '{quote(output / 'icd_map.csv')}' (HEADER, DELIMITER ',')")
+    # icd_map is written after the recovery step below, so recovered rows are included.
     if phecodex_info:
         info_source = relation_for(phecodex_info)
         info_columns = _columns(con, info_source)
@@ -96,15 +238,7 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
     else:
         sex, description, category = "'Both'", "''", "''"
     info_join = "LEFT JOIN phecode_info i USING (phecode)" if phecodex_info and "phecode" in _columns(con, relation_for(phecodex_info)) else ""
-    # Adapter only: enables black-box parity tests; it is not a source of exclusions.
-    con.execute(f"""
-        COPY (SELECT m.phecode, m.source_code AS ICD,
-          CASE WHEN m.vocabulary='ICD9CM' THEN 9 ELSE 10 END AS flag,
-          {sex} AS sex, {description} AS phecode_string, {category} AS phecode_category,
-          '' AS exclude_range
-          FROM icd_map m {info_join})
-        TO '{quote(output / 'phetk_custom_map.csv')}' (HEADER, DELIMITER ',')
-    """)
+    # phetk_custom_map.csv is exported after recovery, below, for the same reason.
 
     snomed_rows: list[tuple] = []
     snomed_summary: dict | None = None
@@ -241,6 +375,29 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
             "snomed_codes_with_partial_map_coverage": partial,
         }
 
+    recovery_summary: dict | None = None
+    if recover_unmapped:
+        # Both routes need the Athena views (`concept`, `relationship`) and the SNOMED
+        # bridge, all of which only exist when --athena-dir was supplied.
+        if not athena_dir:
+            raise ValueError("--recover-unmapped requires --athena-dir: both recovery routes need "
+                             "the Athena vocabulary to enumerate codes and resolve SNOMED mappings.")
+        recovery_summary = _recover_unmapped_codes(con, output, athena_dir, recovery_adjudication)
+
+    # Adapter only: enables black-box parity tests; it is not a source of exclusions.
+    con.execute(f"""
+        COPY (SELECT m.phecode, m.source_code AS ICD,
+          CASE WHEN m.vocabulary='ICD9CM' THEN 9 ELSE 10 END AS flag,
+          {sex} AS sex, {description} AS phecode_string, {category} AS phecode_category,
+          '' AS exclude_range
+          FROM icd_map m {info_join})
+        TO '{quote(output / 'phetk_custom_map.csv')}' (HEADER, DELIMITER ',')
+    """)
+
+    # Written here, not earlier, so recovered rows are in every shipped artefact.
+    con.execute(f"COPY icd_map TO '{quote(output / 'icd_map.parquet')}' (FORMAT PARQUET)")
+    con.execute(f"COPY icd_map TO '{quote(output / 'icd_map.csv')}' (HEADER, DELIMITER ',')")
+
     icd_rows = con.execute("SELECT * FROM icd_map ORDER BY vocabulary, normalized_code, phecode").fetchall()
     _write_xlsx(output / "phecodex_reference_maps.xlsx", {
         "ICD map": (["phecode", "source_code", "vocabulary", "normalized_code"], icd_rows),
@@ -255,6 +412,9 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         "athena_dir": None if not athena_dir else str(athena_dir),
         "counts": {"icd_map_rows": len(icd_rows), "snomed_map_rows": len(snomed_rows)},
         "snomed_bridge": snomed_summary,
+        # Present only when --recover-unmapped was used. Its absence means the map is
+        # exactly what the published PhecodeX files contain.
+        "recovery": recovery_summary,
         # Which source file each vocabulary label came from. PhecodeX ships the WHO
         # ICD-10 map twice: phecodeX_unrolled_ICD_WHO.csv labels its 20,255 rows
         # ICD10, and phecodeX_unrolled_ICD_UKB.csv labels the byte-identical content
@@ -266,8 +426,12 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         # counts codes, which is smaller wherever one code carries several phecodes.
         # Reporting only the second under the name `rows` made two numbers in the same
         # manifest fail to reconcile.
+        # coalesce because --recover-unmapped can introduce a vocabulary whose rows are
+        # ALL recovered, so no published source file backs it; the subquery is then NULL
+        # rather than empty. An empty source_files list is the honest answer there, and
+        # the recovery block below accounts for where those rows came from.
         "vocabularies": {
-            vocabulary: {"rows": rows, "distinct_codes": codes, "source_files": sorted(files)}
+            vocabulary: {"rows": rows, "distinct_codes": codes, "source_files": sorted(files or [])}
             for vocabulary, rows, codes, files in con.execute("""
               SELECT m.vocabulary, count(*) AS rows, count(DISTINCT m.normalized_code) AS codes,
                      (SELECT list(DISTINCT s.source_file) FROM icd_map_sources s
