@@ -189,6 +189,34 @@ curated, versioned supplement to the map — explicit and auditable — rather t
 run-time inference. Codes with no entry are reported in `unmapped_events.csv`;
 review that file rather than assuming a low unmapped rate means good coverage.
 
+### Known upstream defect: limb-pain codes in the ICD-10-CM map
+
+PhecodeX's ICD-10-CM map assigns the **thigh and lower-leg** pain codes to the
+**arm** phecode. This is upstream, in `phecodeX_unrolled_ICD_CM.csv`, and affects
+anyone using that map — the tool reproduces it faithfully because it maps exactly
+what the release contains.
+
+```
+M79.65, M79.651, M79.652   Pain in thigh       -> SS_809.31 [Pain in arm*]
+M79.66, M79.661, M79.662   Pain in lower leg   -> SS_809.31 [Pain in arm*]
+```
+
+`SS_809.32 [Pain in leg*]` exists and receives only the three generic `M79.60x`
+codes. The sibling assignments are correct — `M79.64x` (hand and fingers) goes to
+`SS_809.33` and `M79.67x` (foot and toes) to `SS_809.34` — so this looks like an
+isolated slip rather than a systematic convention.
+
+The practical consequence is that a cohort's "Pain in arm" phenotype silently
+includes people whose only qualifying code was leg pain. On a 2.6M-event UK
+Biobank extract, `M79.66` alone accounted for 2,365 events. If you use
+`SS_809.31`, `SS_809.32`, or their parent `SS_809.3`, treat them as unreliable
+until this is fixed upstream, and consider excluding them with
+`--exclude-phenotypes`.
+
+This was found by comparing unmapped WHO ICD-10 codes against their SNOMED-bridged
+phecodes and adjudicating the disagreements; the same review confirmed the other
+nineteen disagreements were cases where the CM map correctly adds specificity.
+
 ## Quality control
 
 At minimum, check:
