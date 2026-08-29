@@ -169,6 +169,36 @@ upper bound rather than a prediction of a real run. Those limitations are record
 the output metadata. The CSV and SVG are aggregate and safe to share where your data
 agreement permits; the inputs are not.
 
+## Confirming a fixture leaks nothing
+
+If you build a de-identified fixture with `scripts/deidentify_ukb_for_testing.R`, check
+it before it leaves secure compute. This prints **counts only** — never an identifier,
+never a code, never a row — so its output is safe to read out or paste anywhere, while
+its inputs are not.
+
+```bash
+.venv/bin/python scripts/check_deidentification.py \
+  --input ukb_phenotype_file.tab.gz \
+  --cohort cohort_deid.csv.gz \
+  --events events_deid.csv.gz
+```
+
+It answers three questions and exits non-zero on any failure:
+
+1. **Does a real `eid` appear as an output `person_id`?** Must be zero.
+2. **Does a real `eid` appear anywhere in any column?** Must be zero — this catches a
+   stray crosswalk column or an id pasted into a field nobody thought to look at.
+3. **Were code combinations actually broken up?** Reported as the share of output people
+   whose exact code set matches some real person's. A few percent is chance, since
+   people carrying one common code collide often. Near 100% means only the identifier
+   was replaced — which is not de-identification, because a rare diagnosis pattern
+   identifies someone whatever the label says.
+
+Question 3 is the one worth understanding. It is the check that would have caught the
+primary-care script before it was fixed: that script assigned fresh ids while keeping
+each person's whole history together, and on a simulated extract 60 of 60 original code
+pairs survived intact.
+
 ## Prevalence sanity check
 
 Run this once, on your real cohort, after your first full run. It is the only check

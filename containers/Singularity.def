@@ -12,6 +12,7 @@ From: python:3.11-slim
     scripts/plot_phecode_attrition.py /opt/phecodex/scripts/plot_phecode_attrition.py
     scripts/package_distribution.py /opt/phecodex/scripts/package_distribution.py
     scripts/check_prevalence.py /opt/phecodex/scripts/check_prevalence.py
+    scripts/check_deidentification.py /opt/phecodex/scripts/check_deidentification.py
 
 %post
     cd /opt/phecodex

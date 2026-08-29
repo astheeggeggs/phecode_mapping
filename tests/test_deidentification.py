@@ -300,3 +300,84 @@ def test_gp_no_real_eid_and_no_sentinel_date_survives(tmp_path: Path) -> None:
         text = path.read_text()
         assert not any(eid in text for eid in GP_EIDS), f"a real eid appears in {path.name}"
     assert "555555" not in events.read_text(), "a sentinel-dated event survived"
+
+
+# ---------------------------------------------------------------------------
+# The leak checker itself
+# ---------------------------------------------------------------------------
+
+CHECKER = Path(__file__).resolve().parents[1] / "scripts" / "check_deidentification.py"
+
+
+def _check(raw: Path, cohort: Path, events: Path):
+    import sys
+    return subprocess.run([sys.executable, str(CHECKER), "--input", str(raw),
+                           "--cohort", str(cohort), "--events", str(events)],
+                          capture_output=True, text=True)
+
+
+def _raw_extract(path: Path) -> None:
+    rows = []
+    for i, eid in enumerate(EIDS):
+        a, b = f"{chr(65 + i // 50)}{i % 50:02d}", f"{chr(75 + i // 50)}{i % 50:02d}"
+        rows.append([eid, "0" if i % 2 else "1", a, b, str(100 + i)])
+    write_csv(path, ["eid", "22001-0.0", "41270-0.0", "41270-0.1", "41271-0.0"], rows)
+
+
+def test_the_leak_checker_passes_a_properly_deidentified_fixture(tmp_path: Path) -> None:
+    raw = tmp_path / "raw.csv"
+    _raw_extract(raw)
+    cohort, events = tmp_path / "c.csv.gz", tmp_path / "e.csv.gz"
+    proc = subprocess.run(
+        ["Rscript", str(SCRIPT), "--input", str(raw), "--cohort-out", str(cohort),
+         "--events-out", str(events), "--female-code", "0", "--male-code", "1", "--seed", "1"],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    result = _check(raw, cohort, events)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS" in result.stdout
+
+
+def test_the_leak_checker_catches_a_real_id_in_the_output(tmp_path: Path) -> None:
+    """Positive control. A checker that cannot detect a leak is not a checker."""
+    raw = tmp_path / "raw.csv"
+    _raw_extract(raw)
+    cohort, events = tmp_path / "leak_c.csv.gz", tmp_path / "leak_e.csv.gz"
+    with gzip.open(cohort, "wt", newline="") as fh:
+        fh.write("person_id,sex\n")
+        for eid in EIDS:
+            fh.write(f"{eid},Female\n")
+    with gzip.open(events, "wt", newline="") as fh:
+        fh.write("person_id,code,vocabulary,event_date\n")
+        for eid in EIDS:
+            fh.write(f"{eid},A01,ICD10,2015-01-01\n")
+    result = _check(raw, cohort, events)
+    assert result.returncode == 1
+    assert "REAL IDS PRESENT" in result.stdout
+    assert "do NOT move these files" in result.stdout
+
+
+def test_the_leak_checker_catches_pure_relabelling(tmp_path: Path) -> None:
+    """The subtler failure, and the one the GP script was actually committing.
+
+    Fresh synthetic ids, but each person's whole code history kept together under the
+    new name. No identifier leaks, yet a rare diagnosis pattern still identifies the
+    person -- so the id checks pass and only the combination check can catch it.
+    """
+    raw = tmp_path / "raw.csv"
+    _raw_extract(raw)
+    cohort, events = tmp_path / "rl_c.csv.gz", tmp_path / "rl_e.csv.gz"
+    rows = list(csv.reader(raw.open()))[1:]
+    with gzip.open(cohort, "wt", newline="") as fh:
+        fh.write("person_id,sex\n")
+        for i, row in enumerate(rows):
+            fh.write(f"SIM{i:06d},{'Female' if row[1] == '0' else 'Male'}\n")
+    with gzip.open(events, "wt", newline="") as fh:
+        fh.write("person_id,code,vocabulary,event_date\n")
+        for i, row in enumerate(rows):
+            for code, vocab in ((row[2], "ICD10"), (row[3], "ICD10"), (row[4], "ICD9CM")):
+                if code:
+                    fh.write(f"SIM{i:06d},{code},{vocab},2015-01-01\n")
+    result = _check(raw, cohort, events)
+    assert result.returncode == 1, "pure relabelling passed the leak check"
+    assert "COMBINATIONS LARGELY INTACT" in result.stdout
