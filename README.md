@@ -130,7 +130,16 @@ restriction or control exclusion.
 Keep the matrix, unmapped events, and any person-level outputs in the secure
 environment. Share aggregate counts and `audit.json` only where permitted.
 The audit records release and input checksums, row and vocabulary counts,
-mapping mode, thresholds, sex handling, and unmapped-event rates.
+mapping mode, thresholds, sex handling, and unmapped-event rates. Four fields are
+worth checking on every run, because each records something that would otherwise be
+invisible:
+
+| field | why it matters |
+|---|---|
+| `events_in_file` vs `events` | the second is post-join. If they differ, events were dropped because their `person_id` is not in the cohort, and `unmapped_rate` describes only what survived |
+| `control_exclusions.unmatched_rules` | rules that removed no one. Matching is case-sensitive, so part of a policy can silently do nothing |
+| `sex.release_has_sex_metadata` | false means **no** phecode is sex-restricted and every sex-specific phenotype is scored against the whole cohort |
+| `analysis_timezone` | pinned to UTC. Two sites must resolve a timestamp to the same calendar date or `--case-rule two-dates` gives them different case sets |
 
 ## Mapping policy
 
