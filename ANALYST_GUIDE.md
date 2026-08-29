@@ -252,6 +252,12 @@ The repository includes `containers/Dockerfile` and
 `containers/Singularity.def`. They install the pinned dependencies and mapper;
 they do not contain the release or any cohort data.
 
+The image tag below is the **mapper's** version, not a PhecodeX version. Do not tag
+an image `1.1`: the container carries no map at all, and the release you later mount
+into it is normally a hybrid of PhecodeX 1.1 (ICD-10-CM) and 1.0 (WHO ICD-10). Which
+PhecodeX versions you actually used is recorded in the release's `manifest.json` under
+`phecodex_upstream_versions`, and nowhere else.
+
 The standard analyst distribution is ICD-only and does not include
 SNOMED/Athena-derived mapping tables. SNOMED support remains available in the
 advanced build workflow for sites with the appropriate licensing, but those
@@ -260,8 +266,8 @@ outputs must not be added to the shared analyst bundle.
 Build and test Docker locally:
 
 ```bash
-docker build -f containers/Dockerfile -t phecodex-mapper:1.1 .
-docker run --rm phecodex-mapper:1.1 --help
+docker build -f containers/Dockerfile -t phecodex-mapper:0.1.0 .
+docker run --rm phecodex-mapper:0.1.0 --help
 ```
 
 Run against local files by mounting only the secure input/output directories:
@@ -271,7 +277,7 @@ docker run --rm \
   -v "$PWD/release:/data/release:ro" \
   -v "$PWD/input:/data/input:ro" \
   -v "$PWD/output:/data/output" \
-  phecodex-mapper:1.1 run \
+  phecodex-mapper:0.1.0 run \
     --release /data/release \
     --cohort /data/input/cohort.csv \
     --events /data/input/events.csv \
@@ -281,7 +287,7 @@ docker run --rm \
 Build an Apptainer/Singularity image on a build host:
 
 ```bash
-apptainer build phecodex-mapper-1.1.sif containers/Singularity.def
+apptainer build phecodex-mapper-0.1.0.sif containers/Singularity.def
 ```
 
 On clusters where unprivileged builds are required, build the image on an
@@ -293,7 +299,7 @@ apptainer exec \
   --bind /secure/release:/data/release:ro \
   --bind /secure/input:/data/input:ro \
   --bind /secure/output:/data/output \
-  phecodex-mapper-1.1.sif \
+  phecodex-mapper-0.1.0.sif \
   phecodex-map run \
     --release /data/release \
     --cohort /data/input/cohort.csv \
