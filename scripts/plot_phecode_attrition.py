@@ -10,11 +10,26 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import random
 from collections import defaultdict
 from pathlib import Path
 
 import duckdb
+
+
+def _x_tick_values(xmin: int, xmax: int) -> list[int]:
+    """Decade and half-decade ticks (1 and 5 x 10^k) inside the plotted range.
+
+    The endpoints are always labelled. A log axis cannot be read by interpolating
+    between two labels the way a linear one can, so an unlabelled first or last
+    point has no value a reader can recover from the picture.
+    """
+    ticks, magnitude = set(), 1
+    while magnitude <= xmax:
+        ticks.update(value for value in (magnitude, 5 * magnitude) if xmin <= value <= xmax)
+        magnitude *= 10
+    return sorted(ticks | {xmin, xmax})
 
 
 def write_svg(path: Path, rows: list[dict], min_cases: int, min_controls: int) -> None:
@@ -28,18 +43,40 @@ def write_svg(path: Path, rows: list[dict], min_cases: int, min_controls: int) -
                         f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
                         f'font-family="sans-serif">No sample size was smaller than the cohort</text></svg>\n')
         return
-    xmax = max(x for x, _ in points) or 1
+    # Log x. Sample sizes span two to three orders of magnitude, and on a linear axis
+    # everything below ~50,000 collapses into the leftmost few percent of the plot --
+    # which is precisely the range a site decides a planned subset in, and where the
+    # curve is steepest. main() already guarantees every sample_size is >= 1, so the
+    # logarithm is always defined.
+    xmin, xmax = min(x for x, _ in points), max(x for x, _ in points)
+    log_min, log_span = math.log10(xmin), math.log10(xmax) - math.log10(xmin)
     ymax = max(y for _, y in points) or 1
-    def xy(x: int, y: int) -> tuple[float, float]:
-        return margin + x / xmax * (width - 2 * margin), height - margin - y / ymax * (height - 2 * margin)
-    polyline = " ".join(f"{xy(x, y)[0]:.2f},{xy(x, y)[1]:.2f}" for x, y in points)
-    circles = "".join(f'<circle cx="{xy(x, y)[0]:.2f}" cy="{xy(x, y)[1]:.2f}" r="4" fill="#2563eb"/>' for x, y in points)
-    x_ticks = "".join(f'<text x="{xy(x, 0)[0]:.2f}" y="{height-margin+22}" text-anchor="middle">{x:,}</text>' for x in (0, xmax/2, xmax))
-    y_ticks = "".join(f'<text x="{margin-8}" y="{xy(0, y)[1]+4:.2f}" text-anchor="end">{int(y):,}</text>' for y in (0, ymax/2, ymax))
+    plot_width, plot_height = width - 2 * margin, height - 2 * margin
+
+    def x_at(x: int) -> float:
+        # A single requested size (or several identical ones) leaves nothing to spread
+        # across the axis; centre it rather than dividing by a zero span.
+        if log_span <= 0:
+            return margin + plot_width / 2
+        return margin + (math.log10(x) - log_min) / log_span * plot_width
+
+    def y_at(y: float) -> float:
+        return height - margin - y / ymax * plot_height
+
+    polyline = " ".join(f"{x_at(x):.2f},{y_at(y):.2f}" for x, y in points)
+    circles = "".join(f'<circle cx="{x_at(x):.2f}" cy="{y_at(y):.2f}" r="4" fill="#2563eb"/>' for x, y in points)
+    x_ticks = "".join(
+        f'<line x1="{x_at(x):.2f}" y1="{height-margin}" x2="{x_at(x):.2f}" y2="{height-margin+5}" stroke="black"/>'
+        f'<text x="{x_at(x):.2f}" y="{height-margin+22}" text-anchor="middle">{x:,}</text>'
+        for x in _x_tick_values(xmin, xmax))
+    y_ticks = "".join(
+        f'<line x1="{margin-5}" y1="{y_at(y):.2f}" x2="{margin}" y2="{y_at(y):.2f}" stroke="black"/>'
+        f'<text x="{margin-8}" y="{y_at(y)+4:.2f}" text-anchor="end">{int(y):,}</text>'
+        for y in (0, ymax / 2, ymax))
     path.write_text(f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
 <rect width="100%" height="100%" fill="white"/><line x1="{margin}" y1="{height-margin}" x2="{width-margin}" y2="{height-margin}" stroke="black"/><line x1="{margin}" y1="{margin}" x2="{margin}" y2="{height-margin}" stroke="black"/>
 <polyline points="{polyline}" fill="none" stroke="#2563eb" stroke-width="3"/>{circles}
-<g font-family="sans-serif" font-size="12" fill="black">{x_ticks}{y_ticks}<text x="{width/2}" y="{height-15}" text-anchor="middle">Downsampled cohort size</text><text x="20" y="{height/2}" transform="rotate(-90 20 {height/2})" text-anchor="middle">PhecodeX phenotypes retained</text></g>
+<g font-family="sans-serif" font-size="12" fill="black">{x_ticks}{y_ticks}<text x="{width/2}" y="{height-15}" text-anchor="middle">Downsampled cohort size (log scale)</text><text x="20" y="{height/2}" transform="rotate(-90 20 {height/2})" text-anchor="middle">PhecodeX phenotypes retained</text></g>
 <text x="{width/2}" y="25" text-anchor="middle">PhecodeX attrition (case/control cutoff {min_cases})</text></svg>\n''')
 
 

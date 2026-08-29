@@ -271,6 +271,16 @@ thresholds — by default 200 cases *and* 200 controls among the people evaluabl
 it. Measured on UK Biobank hospital-coded data, following the documented `run`
 workflow with its default exclusions:
 
+![Analysable PhecodeX phenotypes against cohort size: 0 at 1,000 people, rising to 122 at 10,000, 615 at 100,000 and 1,158 at 500,000, plotted on a logarithmic cohort-size axis](attrition.svg)
+
+*The x-axis is logarithmic, which is the scale a planning decision is actually made
+on — it keeps the 1,000–50,000 range legible instead of collapsing it against the
+axis. Read the slope accordingly: the curve rises across the plot because each
+**doubling** of the cohort still adds phenotypes (+76 from 5,000 to 10,000, +187 from
+50,000 to 100,000, +208 from 100,000 to 200,000), while the return per additional
+**person** falls throughout, as the table's third column shows. Both are the same nine
+points, from a single random draw per sample size.*
+
 | cohort size | analysable phecodes | gained per additional 10,000 people |
 |---:|---:|---:|
 | 1,000 | 0 | — |
