@@ -11,8 +11,7 @@ athena/
 scratchpad_ukb/
 *deid*.csv
 
-# Local source downloads, generated releases, reports, and cohort runs. The
-# shareable distribution archive under distributions/ is tracked separately.
+# Local source downloads, generated releases, reports, and cohort runs.
 hierarchy_sources/
 releases/
 runs/
@@ -20,3 +19,9 @@ reports/
 phecodex_results_*/
 phecodeX_*.csv
 phecodeX_*_manifest.json
+
+# Analyst bundles. Derived output, regenerable from this repo plus the PhecodeX
+# source maps, and large enough that committing one would sit in git history
+# permanently. Publish them as GitHub Releases instead, with the .sha256 sidecar
+# attached alongside the archive.
+distributions/
