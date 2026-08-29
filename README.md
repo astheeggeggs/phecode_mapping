@@ -7,7 +7,9 @@ biobank; participant-level data never needs to leave the secure environment.
 **If you are an analyst running a release someone sent you**, you need four sections:
 [Install](#install), [Standard workflow](#standard-workflow),
 [Input contract](#input-contract) and [Outputs](#outputs) — then
-[Quality control](#quality-control) once you have a run. [ANALYST_GUIDE.md](ANALYST_GUIDE.md)
+[Quality control](#quality-control) once you have a run.
+[How many phenotypes will I get?](#how-many-phenotypes-will-i-get) is worth reading
+before you plan the analysis. [ANALYST_GUIDE.md](ANALYST_GUIDE.md)
 covers UK Biobank extraction, containers, and the two checks worth running once.
 Everything below "What the map contains" is background you do not need to start.
 
@@ -260,6 +262,51 @@ This is a plausibility comparison, not an exact expected-count test. The
 report flags denominator, ancestry, sex-stratum, version, and missing-trait
 differences for manual review. Never export participant-level records from
 an external resource for this comparison.
+
+## How many phenotypes will I get?
+
+Fewer than the map contains, and the answer depends strongly on cohort size. The
+release maps 3,680 phecodes, but a phecode is only analysable if it clears both
+thresholds — by default 200 cases *and* 200 controls among the people evaluable for
+it. Measured on UK Biobank hospital-coded data, following the documented `run`
+workflow with its default exclusions:
+
+| cohort size | analysable phecodes | gained per additional 10,000 people |
+|---:|---:|---:|
+| 1,000 | 0 | — |
+| 5,000 | 46 | 115 |
+| 10,000 | 122 | 152 |
+| 25,000 | 239 | 78 |
+| 50,000 | 428 | 76 |
+| 100,000 | 615 | 37 |
+| 200,000 | 823 | 21 |
+| 350,000 | 1,025 | 14 |
+| 500,000 | 1,158 | 9 |
+
+Three things worth taking from this when planning:
+
+**Returns fall away sharply.** Going from 10,000 to 25,000 buys about 78 phenotypes
+per additional 10,000 people; going from 350,000 to 500,000 buys about 9. The curve is
+still climbing at half a million — it has not saturated — but each new phenotype is
+progressively rarer and will be analysed at correspondingly lower power.
+
+**Small cohorts are not simply "the same analysis, smaller".** At 1,000 people nothing
+clears 200 cases, so the answer is zero phenotypes rather than a few. If your site is
+below roughly 5,000 people, the thresholds — not the map — are what determines your
+analysis, and they are worth setting deliberately rather than inheriting.
+
+**Even at 500,000 you analyse about a third of the map.** 1,158 of 3,680. The rest are
+genuinely too rare in a population cohort, which is expected rather than a defect —
+PhecodeX is built to cover the phenome, not to be exhaustively powered in any one study.
+
+Reproduce or re-derive this for your own cohort and thresholds with
+[`scripts/plot_phecode_attrition.py`](scripts/plot_phecode_attrition.py); see
+[ANALYST_GUIDE.md](ANALYST_GUIDE.md). Two caveats attach to the numbers above. They
+come from a single random draw per sample size, so the small end is noisy. And control
+exclusions are not modelled, so a study using `--control-exclusions` should read them
+as a slight upper bound. Everything else — sex-restricted denominators included — is
+computed exactly as a real run computes it, and the full-cohort point was reconciled
+against the run it came from.
 
 ## Privacy and data governance
 

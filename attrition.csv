@@ -1,0 +1,10 @@
+sample_size,retained_phecodes,min_cases,min_controls,sex_aware,seed
+1000,0,200,200,True,1
+5000,46,200,200,True,1
+10000,122,200,200,True,1
+25000,239,200,200,True,1
+50000,428,200,200,True,1
+100000,615,200,200,True,1
+200000,823,200,200,True,1
+350000,1025,200,200,True,1
+500000,1158,200,200,True,1
