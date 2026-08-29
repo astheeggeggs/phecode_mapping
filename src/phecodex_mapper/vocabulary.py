@@ -547,16 +547,31 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
                              "the Athena vocabulary to enumerate codes and resolve SNOMED mappings.")
         recovery_summary = _recover_unmapped_codes(con, output, athena_dir, recovery_adjudication)
 
-    # Adapter only: enables black-box parity tests; it is not a source of exclusions.
-    con.execute(f"""
-        COPY (SELECT m.phecode, m.source_code AS ICD,
-          CASE WHEN m.vocabulary='ICD9CM' THEN 9 ELSE 10 END AS flag,
-          {sex} AS sex, {description} AS phecode_string, {category} AS phecode_category,
-          '' AS exclude_range
-          FROM icd_map m {info_join}
-          ORDER BY m.vocabulary, m.normalized_code, m.phecode, m.source_code)
-        TO '{quote(output / 'phetk_custom_map.csv')}' (HEADER, DELIMITER ',')
-    """)
+    # PheTK adapters. Not a source of exclusions; they exist so a site running PheTK
+    # gets the same phenotypes this tool would.
+    #
+    # One file per ICD-10 flavour, because PheTK's custom format cannot express the
+    # difference. Its `flag` column is 9 or 10 only, so a single combined file put WHO
+    # ICD-10 and ICD-10-CM rows under the same 10 -- and PheTK, matching on flag, then
+    # resolved a WHO event against ICD-10-CM-only rows. Measured against a 2.6M-event
+    # extract, that made PheTK's output a strict SUPERSET of ours: 288,724 extra
+    # (person, phecode) pairs, 91.9% agreement, entirely from the 105,511 (code, phecode)
+    # pairs that exist only under ICD10CM. Our exact (code, vocabulary) join was the
+    # correct side; the adapter was misrepresenting the map.
+    #
+    # ICD9CM rows appear in both files. flag=9 is unambiguous, and a site's events
+    # normally carry both an ICD-9 and an ICD-10 vocabulary.
+    for label, vocabulary in (("icd10", "ICD10"), ("icd10cm", "ICD10CM")):
+        con.execute(f"""
+            COPY (SELECT m.phecode, m.source_code AS ICD,
+              CASE WHEN m.vocabulary='ICD9CM' THEN 9 ELSE 10 END AS flag,
+              {sex} AS sex, {description} AS phecode_string, {category} AS phecode_category,
+              '' AS exclude_range
+              FROM icd_map m {info_join}
+              WHERE m.vocabulary IN ('ICD9CM', '{vocabulary}')
+              ORDER BY m.vocabulary, m.normalized_code, m.phecode, m.source_code)
+            TO '{quote(output / f'phetk_custom_map_{label}.csv')}' (HEADER, DELIMITER ',')
+        """)
 
     # Written here, not earlier, so recovered rows are in every shipped artefact.
     icd_ordered = "SELECT * FROM icd_map ORDER BY vocabulary, normalized_code, phecode, source_code"

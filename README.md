@@ -446,7 +446,10 @@ so a shared release carries none of its tables. See the note above on
 `assignments_resting_solely_on_athena_evidence` before sharing a recovered map.
 
 Cross-checks against [PheTK](https://github.com/nhgritctran/PheTK) use the adapter in
-`phetk_custom_map.csv`.
+`phetk_custom_map_icd10.csv` and `phetk_custom_map_icd10cm.csv` — one per ICD-10
+flavour, because PheTK's custom format identifies a vocabulary only as 9 or 10 and so
+cannot tell WHO ICD-10 from ICD-10-CM. Use the file matching your events' `vocabulary`
+label; a combined file makes PheTK resolve a WHO event against ICD-10-CM-only rows.
 
 ## Advanced release building
 
