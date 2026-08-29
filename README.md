@@ -388,11 +388,15 @@ PhecodeX is built to cover the phenome, not to be exhaustively powered in any on
 Reproduce or re-derive this for your own cohort and thresholds with
 [`scripts/plot_phecode_attrition.py`](scripts/plot_phecode_attrition.py); see
 [ANALYST_GUIDE.md](ANALYST_GUIDE.md). Two caveats attach to the numbers above. They
-come from a single random draw per sample size, so the small end is noisy. And control
-exclusions are not modelled, so a study using `--control-exclusions` should read them
-as a slight upper bound. Everything else — sex-restricted denominators included — is
-computed exactly as a real run computes it, and the full-cohort point was reconciled
-against the run it came from.
+come from a single random draw per sample size, so the small end is noisy. And the
+curve cannot see the people a run REMOVES from a control pool, because those removals
+are person-level and live only in the run — so it is an upper bound for a study using
+`--control-exclusions`, and *also* for one using `--case-rule two-dates`, where
+single-occurrence carriers are neither cases nor controls. The numbers above use the
+documented defaults (`any-event`, no control exclusions), for which no one is removed
+and the curve is exact. Everything else — sex-restricted denominators included — is
+computed by the same code a real run uses (`phecodex_mapper.retention`), and the
+full-cohort point was reconciled against the run it came from.
 
 ## Privacy and data governance
 
