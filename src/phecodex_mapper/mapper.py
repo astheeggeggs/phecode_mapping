@@ -52,11 +52,20 @@ def validate_cohort_and_events(con, cohort_src: str, event_src: str) -> dict:
     if duplicate_people or null_people:
         raise ValueError(f"cohort person_id must be non-null and unique "
                          f"(duplicates={duplicate_people}, null_or_blank={null_people})")
+    # Blank counts as missing, whatever the file format says. Only SQL NULL used to
+    # qualify, and DuckDB's CSV reader turns an empty field into NULL while Parquet
+    # preserves the empty string -- so the same cohort ran as CSV and was refused as
+    # Parquet, with a message that named blank as acceptable and then reported '' as the
+    # offending value. Two sites holding the same people disagreed purely on export
+    # format, and README and ANALYST_GUIDE both document sex as "Male, Female, or blank".
+    # Downstream already handles this: anything outside MALE/FEMALE is n_unknown_sex,
+    # which is what makes those people non-evaluable rather than silently evaluable.
     bad_sex = con.execute(
         f"SELECT DISTINCT sex FROM {cohort_src} WHERE sex IS NOT NULL"
+        f" AND trim(CAST(sex AS VARCHAR)) <> ''"
         f" AND upper(trim(CAST(sex AS VARCHAR))) NOT IN ('MALE', 'FEMALE')").fetchall()
     if bad_sex:
-        raise ValueError(f"cohort sex must be Male, Female, or missing; found: {[r[0] for r in bad_sex[:10]]}")
+        raise ValueError(f"cohort sex must be Male, Female, or blank; found: {[r[0] for r in bad_sex[:10]]}")
 
     event_rows = con.execute(f"SELECT count(*) FROM {event_src}").fetchone()[0]
     missing_event_fields = con.execute(
@@ -319,12 +328,22 @@ def _load_phecode_sex(con, release: Path) -> dict:
 EVALUABLE = "(ps.restrict_sex IS NULL OR c.sex = ps.restrict_sex)"
 
 
-def _apply_control_exclusions(con, target_table: str, mapped_table: str) -> None:
+def _apply_control_exclusions(con, target_table: str, mapped_table: str) -> dict:
     """Populate a control-exclusion table from the normalized `exclusions_input`.
 
     Values in exclusions_input are already canonical (see map_phecodes), so the only
     normalization here is ICD punctuation stripping, which must match the
     normalized_events expression.
+
+    Returns which rules matched nothing. The sibling --exclude-phenotypes path already
+    reports its unmatched rules, on the reasoning that silence there "is worse than
+    silence: it reads as confirmation the rule worked". The same argument applies here
+    and more sharply: a control exclusion that matches nothing leaves the people the
+    policy meant to remove sitting in the control pool as 0 rather than blank, which
+    inflates every control denominator and biases every downstream association. The
+    run was previously bit-for-bit identical to supplying no exclusions file at all --
+    `phecode` and `exclusion_value` are matched byte-exactly, so 'gu_001' for 'GU_001',
+    or a code rule labelled ICD10 against an ICD10CM extract, silently applied nothing.
     """
     con.execute(f"""
       INSERT INTO {target_table}
@@ -336,6 +355,32 @@ def _apply_control_exclusions(con, target_table: str, mapped_table: str) -> None
         AND x.vocabulary = e.vocabulary
         AND regexp_replace(upper(x.exclusion_value), '[.\\s-]', '', 'g') = e.normalized_code
     """)
+    # A rule is "unmatched" when it contributed no person at all. Reported per rule so
+    # the offending row can be found in the policy file, not just counted.
+    unmatched = [
+        {"phecode": row[0], "exclusion_type": row[1], "exclusion_value": row[2],
+         "vocabulary": row[3]}
+        for row in con.execute(f"""
+          SELECT x.phecode, x.exclusion_type, x.exclusion_value, x.vocabulary
+          FROM exclusions_input x
+          WHERE NOT EXISTS (
+            SELECT 1 FROM {mapped_table} m
+            WHERE x.exclusion_type = 'phecode' AND x.exclusion_value = m.phecode)
+            AND NOT EXISTS (
+            SELECT 1 FROM normalized_events e
+            WHERE x.exclusion_type = 'code' AND x.vocabulary = e.vocabulary
+              AND regexp_replace(upper(x.exclusion_value), '[.\\s-]', '', 'g') = e.normalized_code)
+          ORDER BY 1, 2, 3
+        """).fetchall()]
+    if unmatched:
+        shown = [f"{r['phecode']}<-{r['exclusion_type']}:{r['exclusion_value']}" for r in unmatched[:8]]
+        print(f"phecodex-map: warning: {len(unmatched)} --control-exclusions rule(s) matched nothing "
+              f"and removed no one from any control set: {shown}. Matching on phecode and "
+              f"exclusion_value is case-sensitive, and a code rule must name the same vocabulary "
+              f"label as your events. The run is otherwise identical to supplying no exclusions "
+              f"file at all.", file=sys.stderr)
+    return {"rules": con.execute("SELECT count(*) FROM exclusions_input").fetchone()[0],
+            "unmatched_rules": unmatched}
 
 
 def _build_cases_and_counts(con, *, mapped_table: str, exclusions_table: str,
@@ -557,6 +602,7 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     con.execute("CREATE TABLE exclusions(person_id VARCHAR, phecode VARCHAR)")
     con.execute("CREATE TABLE exclusions_input(phecode VARCHAR, exclusion_type VARCHAR, exclusion_value VARCHAR, vocabulary VARCHAR)")
     exclusion_version = None
+    control_exclusion_summary = None
     if exclusions:
         ex_src = relation_for(exclusions); cols = _columns(con, ex_src)
         need = {"phecode", "exclusion_type", "exclusion_value", "vocabulary"}
@@ -586,7 +632,7 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
         _reject_missing(con, "exclusions_input", "phecode", "--control-exclusions")
         _reject_missing(con, "exclusions_input", "exclusion_value", "--control-exclusions")
         if "version" in cols: exclusion_version = con.execute("SELECT min(version) FROM exclusions_input").fetchone()[0]
-        _apply_control_exclusions(con, "exclusions", "mapped_events")
+        control_exclusion_summary = _apply_control_exclusions(con, "exclusions", "mapped_events")
     _build_cases_and_counts(con, mapped_table="mapped_events", exclusions_table="exclusions",
                             case_rule=case_rule, min_cases=min_cases, min_controls=min_controls)
     # Ordered, all of them. preserve_insertion_order is off and DuckDB writes in
@@ -677,6 +723,9 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
              # calendar date or two-dates gives them different case sets. See io.connect.
              "analysis_timezone": ANALYSIS_TIMEZONE,
              "min_cases": min_cases, "min_controls": min_controls, "exclusion_version": exclusion_version,
+             # None when no --control-exclusions file was supplied. A non-empty
+             # unmatched_rules means part of the policy silently did nothing.
+             "control_exclusions": control_exclusion_summary,
              "exclude_phenotypes": None if not exclude_phenotypes else {"file": str(exclude_phenotypes), **exclusion_summary},
              # events is POST-join; events_in_file is what was supplied. They differ when
              # the events file covers people outside the cohort, and the unmapped rate is
@@ -715,16 +764,13 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
     counts_table, cases_table, exclusions_table = "phecode_counts", "cases", "noncase_excluded"
     retained_phecodes = [r[0] for r in con.execute(f"SELECT phecode FROM {counts_table} WHERE retained ORDER BY phecode").fetchall()]
     sex_restricted_retained = [p for p in retained_phecodes if p in phecode_sex]
-    if sex_restricted_retained and not has_sex:
-        # Not fatal: without a cohort sex column we cannot tell an ineligible
-        # opposite-sex person apart from a genuine control, so those cells
-        # are left as ordinary controls (0) rather than NA. Flag this loudly
-        # in the audit trail rather than silently producing a matrix that
-        # looks complete but is wrong for these columns.
-        print(f"phecodex-map: warning: {len(sex_restricted_retained)} retained phecode(s) are sex-restricted "
-              "but --cohort has no 'sex' column -- those columns will contain 0 for opposite-sex people "
-              "instead of NA. Add a 'sex' column (values 'Male'/'Female') to --cohort to fix this.",
-              file=sys.stderr)
+    # There is deliberately no "sex-restricted phecodes scored without sex" branch here.
+    # map_phecodes raises whenever the release has restricted phecodes and the cohort has
+    # no usable sex, so `sex_restricted_retained and not has_sex` cannot occur: the
+    # warning that used to live here, and the audit field it documented, described a
+    # state the hard guard already prevents. Both were structurally unreachable, and the
+    # warning's text was wrong besides -- an unknown-sex person satisfies
+    # `c.sex IS NULL OR c.sex <> restrict_sex` and gets NULL, not the 0 it claimed.
 
     dropped_reason = None
     if not retained_phecodes:
@@ -825,12 +871,11 @@ def _write_phenotype_matrix(con, release: Path, output: Path, has_sex: bool) -> 
     con.execute(f"COPY ({matrix_ordered}) TO '{quote(output / (output_stem + '.csv.gz'))}' (HEADER, DELIMITER ',', COMPRESSION 'gzip')")
     return {
         "n_columns": len(retained_phecodes),
-        # Derived from cohort_sex_counts by the caller, not hardwired. When this is
-        # false the run carries sex-restricted phecodes it cannot evaluate, and the
-        # field below is non-zero rather than a constant 0.
+        # Derived from cohort_sex_counts by the caller, never hardwired -- it was a
+        # literal True once, which made a cohort with no usable sex look evaluable.
+        # False is reachable: a release with no sex metadata against an all-blank cohort.
         "cohort_has_usable_sex": has_sex,
         "sex_restricted_retained_phecodes": len(sex_restricted_retained),
-        "sex_restricted_phecodes_treated_as_unrestricted": 0 if has_sex else len(sex_restricted_retained),
         # Present only when the matrix came out empty; explains which threshold bit.
         "no_columns_retained_because": dropped_reason,
     }

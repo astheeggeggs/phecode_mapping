@@ -171,3 +171,68 @@ def test_info_may_still_carry_phecodes_the_map_does_not(tmp_path: Path) -> None:
     release = tmp_path / "rel_extra"
     build_vocabulary(source, info, release, None)
     assert (release / "phecode_info.parquet").is_file()
+
+
+def test_cohort_has_usable_sex_is_false_when_it_should_be(tmp_path: Path) -> None:
+    """The field this file exists to keep honest was never asserted False.
+
+    test_audit_sex_fields_are_derived_not_constant reasons about it in its docstring
+    but reads only release_has_sex_metadata and n_restricted_phecodes, so hardcoding
+    cohort_has_usable_sex back to a literal True -- the original defect -- left the
+    whole suite green. The configuration is reachable: a release with no sex metadata
+    (so nothing is restricted, and the hard guard does not fire) against a cohort whose
+    sex column is entirely blank.
+    """
+    source = tmp_path / "m.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "I10", "ICD10CM"]])
+    info = tmp_path / "i.csv"          # no `sex` column at all
+    write_csv(info, ["phecode", "phecode_string", "category"], [["CV_003", "Hypertension", "CV"]])
+    release = tmp_path / "rel_nosex"
+    build_vocabulary(source, info, release, None)
+
+    cohort, events = tmp_path / "c.csv", tmp_path / "e.csv"
+    write_csv(cohort, ["person_id", "sex"], [["p1", ""], ["p2", ""], ["p3", ""]])
+    write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "I10", "ICD10CM"]])
+    out = tmp_path / "out_nosex"
+    map_phecodes(release, cohort, events, out, min_cases=1, min_controls=1)
+
+    matrix_info = json.loads((out / "audit.json").read_text())["phenotype_matrix"]
+    assert matrix_info["cohort_has_usable_sex"] is False
+    assert json.loads((out / "audit.json").read_text())["sex"]["n_unknown_sex"] == 3
+
+
+def test_a_wrong_sex_carrier_is_not_reported_as_an_excluded_control(tmp_path: Path) -> None:
+    """excluded_control_count is the column that explains the control denominator.
+
+    The sex filter on it had no test: test_sex_restriction reasons about exactly this
+    number in a comment but its helper never selects the column, so deleting the filter
+    changed the shipped value in phecode_counts and eligible_phecodes.xlsx and the whole
+    suite stayed green. A male carrier of a Female-only phecode is not evaluable, so he
+    cannot be an excluded control for it.
+    """
+    source = tmp_path / "ms.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"],
+              [["GU_001", "A01.1", "ICD10CM"], ["CV_003", "I10", "ICD10CM"]])
+    info = tmp_path / "is.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"],
+              [["GU_001", "Female", "Endometriosis", "Genitourinary"],
+               ["CV_003", "Both", "Hypertension", "Cardiovascular"]])
+    release = tmp_path / "rel_ec"
+    build_vocabulary(source, info, release, None)
+
+    cohort, events = tmp_path / "c_ec.csv", tmp_path / "e_ec.csv"
+    write_csv(cohort, ["person_id", "sex"],
+              [["f1", "Female"], ["f2", "Female"], ["m1", "Male"], ["m2", "Male"]])
+    # f2 and m2 carry the exclusion code but are not cases; only f2 is evaluable for GU_001.
+    write_csv(events, ["person_id", "code", "vocabulary"],
+              [["f1", "A01.1", "ICD10CM"], ["f2", "I10", "ICD10CM"], ["m2", "I10", "ICD10CM"]])
+    exclusions = tmp_path / "x.csv"
+    write_csv(exclusions, ["phecode", "exclusion_type", "exclusion_value", "vocabulary"],
+              [["GU_001", "code", "I10", "ICD10CM"]])
+    out = tmp_path / "out_ec"
+    map_phecodes(release, cohort, events, out, exclusions=exclusions, min_cases=1, min_controls=1)
+
+    excluded = duckdb.sql(
+        f"SELECT excluded_control_count FROM read_parquet('{out / 'phecode_counts.parquet'}')"
+        " WHERE phecode = 'GU_001'").fetchone()[0]
+    assert excluded == 1, f"expected only the evaluable female carrier, got {excluded}"

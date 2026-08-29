@@ -212,3 +212,106 @@ def test_events_for_people_outside_the_cohort_are_reported(tmp_path: Path, relea
     assert audit["events_for_unknown_people"] == 9
     assert audit["events"] == 1, "post-join count should reflect only cohort members"
     assert audit["unmapped_rate"] == 0.0, "the surviving event maps, which is the trap"
+
+
+def test_a_blank_sex_behaves_the_same_in_csv_and_parquet(tmp_path: Path) -> None:
+    """Two sites holding the same people must not diverge on export format.
+
+    Only SQL NULL used to count as "missing". DuckDB's CSV reader turns an empty field
+    into NULL, but Parquet preserves the empty string -- so the identical cohort ran as
+    CSV and was refused as Parquet, with a message that named blank as acceptable and
+    then reported '' as the offending value. Both README and ANALYST_GUIDE document sex
+    as "Male, Female, or blank", and Parquet is the realistic export at biobank scale.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    source = tmp_path / "m.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "I10", "ICD10CM"]])
+    info = tmp_path / "i.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"], [["CV_003", "Both", "H", "C"]])
+    release = tmp_path / "rel"
+    build_vocabulary(source, info, release, None)
+
+    events = tmp_path / "e.csv"
+    write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "I10", "ICD10CM"]])
+    csv_cohort = tmp_path / "c.csv"
+    write_csv(csv_cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", ""]])
+    parquet_cohort = tmp_path / "c.parquet"
+    pq.write_table(pa.table({"person_id": ["p1", "p2"], "sex": ["Female", ""]}), parquet_cohort)
+
+    audits = []
+    for name, cohort in (("csv", csv_cohort), ("parquet", parquet_cohort)):
+        out = tmp_path / f"out_{name}"
+        map_phecodes(release, cohort, events, out, min_cases=1, min_controls=1)
+        audits.append(json.loads((out / "audit.json").read_text())["sex"])
+    assert audits[0] == audits[1], f"export format changed the result: {audits}"
+    assert audits[0]["n_unknown_sex"] == 1
+
+
+def test_an_unrecognised_sex_value_is_still_refused(tmp_path: Path, release: Path) -> None:
+    """Negative control: accepting blank must not mean accepting anything."""
+    cohort, events = tmp_path / "c.csv", tmp_path / "e.csv"
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "M"]])
+    write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "A01.1", "ICD10CM"]])
+    with pytest.raises(ValueError, match="cohort sex must be Male, Female, or blank"):
+        map_phecodes(release, cohort, events, tmp_path / "out", min_cases=1, min_controls=1)
+
+
+def test_control_exclusion_rules_that_match_nothing_are_reported(tmp_path: Path, capsys) -> None:
+    """A policy that silently does nothing leaves people in the control pool as 0.
+
+    --exclude-phenotypes already reports its unmatched rules, on the reasoning that
+    silence "reads as confirmation the rule worked". --control-exclusions had no
+    equivalent: phecode and exclusion_value are matched byte-exactly, so 'gu_001' for
+    'GU_001', or a code rule labelled ICD10 against an ICD10CM extract, produced a run
+    bit-for-bit identical to supplying no exclusions file at all.
+    """
+    from phecodex_mapper.vocabulary import build_vocabulary
+    source = tmp_path / "m.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "I10", "ICD10CM"]])
+    info = tmp_path / "i.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"], [["CV_003", "Both", "H", "C"]])
+    release = tmp_path / "rel"
+    build_vocabulary(source, info, release, None)
+
+    cohort, events = tmp_path / "c.csv", tmp_path / "e.csv"
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Female"]])
+    write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "I10", "ICD10CM"]])
+    exclusions = tmp_path / "x.csv"
+    write_csv(exclusions, ["phecode", "exclusion_type", "exclusion_value", "vocabulary"],
+              [["CV_003", "phecode", "CV_003", "ICD10CM"],   # matches
+               ["CV_003", "phecode", "cv_003", "ICD10CM"],   # mis-cased -> nothing
+               ["CV_003", "code", "I10", "ICD10"]])          # wrong ICD-10 flavour -> nothing
+    out = tmp_path / "out"
+    map_phecodes(release, cohort, events, out, exclusions=exclusions, min_cases=1, min_controls=1)
+
+    assert "matched nothing" in capsys.readouterr().err
+    summary = json.loads((out / "audit.json").read_text())["control_exclusions"]
+    assert summary["rules"] == 3
+    unmatched = {(r["exclusion_type"], r["exclusion_value"]) for r in summary["unmatched_rules"]}
+    assert unmatched == {("phecode", "cv_003"), ("code", "I10")}, unmatched
+
+
+def test_control_exclusions_that_all_match_are_not_reported(tmp_path: Path, capsys) -> None:
+    """Negative control: a warning on every run teaches analysts to ignore it."""
+    from phecodex_mapper.vocabulary import build_vocabulary
+    source = tmp_path / "m2.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "I10", "ICD10CM"]])
+    info = tmp_path / "i2.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"], [["CV_003", "Both", "H", "C"]])
+    release = tmp_path / "rel2"
+    build_vocabulary(source, info, release, None)
+
+    cohort, events = tmp_path / "c2.csv", tmp_path / "e2.csv"
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Female"]])
+    write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "I10", "ICD10CM"]])
+    exclusions = tmp_path / "x2.csv"
+    write_csv(exclusions, ["phecode", "exclusion_type", "exclusion_value", "vocabulary"],
+              [["CV_003", "code", "I10", "ICD10CM"]])
+    out = tmp_path / "out2"
+    map_phecodes(release, cohort, events, out, exclusions=exclusions, min_cases=1, min_controls=1)
+
+    assert "matched nothing" not in capsys.readouterr().err
+    assert json.loads((out / "audit.json").read_text())["control_exclusions"]["unmatched_rules"] == []
