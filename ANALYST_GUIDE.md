@@ -36,7 +36,11 @@ person_id,sex
 person_id,code,vocabulary,event_date
 ```
 
-`event_date` may be omitted for the default one-event case rule. Supported
+`event_date` may be omitted for the default one-event case rule. If you extract with
+`scripts/prepare_ukb_for_mapping.R` it is populated from UKB's parallel date arrays
+(41280/41281) and the script reports how many events carry a date; see the README's
+input-contract section for what `--case-rule two-dates` then measures on that source,
+which is not "two visits". Supported
 vocabularies are `ICD9CM`, `ICD10`, `ICD10CM`, and `SNOMED`. Sex must be
 `Male`, `Female`, or blank.
 

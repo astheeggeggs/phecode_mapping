@@ -512,6 +512,20 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     # question, answered after _load_phecode_sex below.
     if case_rule == "two-dates" and "event_date" not in _columns(con, event_src): raise ValueError("two-dates requires event_date")
     if case_rule == "two-dates":
+        # An event_date column that is entirely empty passes the presence check above
+        # and every parseability check below -- there is nothing unparseable about a
+        # NULL -- and then yields zero cases, because count(DISTINCT event_date) ignores
+        # NULLs. A site would get an empty phenotype matrix from a rule that never had
+        # any dates to apply. Refuse, rather than let the presence of a column stand in
+        # for the presence of dates.
+        usable_dates = con.execute(
+            f"SELECT count(*) FROM {event_src} WHERE event_date IS NOT NULL"
+            f" AND trim(CAST(event_date AS VARCHAR)) <> ''").fetchone()[0]
+        if not usable_dates:
+            raise ValueError(
+                "--case-rule two-dates was requested but every event_date is empty, so no "
+                "person can have two distinct dates and the result would be zero cases. Supply "
+                "dated events, or use --case-rule any-event.")
         # try_cast returns NULL for a non-ISO date rather than failing, and the
         # two-dates rule then never sees a second date -- silently demoting genuine
         # repeat-coded cases to clean controls, with unmapped_rate still 0.0.

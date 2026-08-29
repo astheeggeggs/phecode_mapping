@@ -93,7 +93,20 @@ person_id,code,vocabulary,event_date
 `event_date` is optional for the default `any-event` rule, but required for
 `--case-rule two-dates`, which additionally requires every date to be ISO
 `YYYY-MM-DD`; a run refuses to start otherwise rather than silently treating
-unparseable dates as absent.
+unparseable dates as absent. A column present but entirely empty is refused too — the
+presence of a column is not the presence of dates, and it would otherwise yield zero
+cases from a rule that had no dates to apply.
+
+**On UK Biobank, know what `two-dates` measures.** `prepare_ukb_for_mapping.R` takes
+dates from UKB's parallel date arrays (41280 for the 41270 ICD-10 diagnoses, 41281 for
+41271), matched by array index. But 41280 records the date a code was *first* recorded,
+so each (person, code) pair carries exactly one date. A person is therefore a two-dates
+case when **two different codes mapping to the same phecode were first recorded on
+different days** — not when the same code appears at two separate visits, which the wide
+extract cannot express. That is stricter than `any-event` and looser than "two
+encounters". For genuine per-episode dates you need the HES episode tables
+(`hesin`/`hesin_diag`). Events from the cancer-registry and death-cause fields are
+emitted undated and simply do not contribute a date.
 
 Under `two-dates`, a person carrying a phecode on only one date is neither a case
 nor a control: they are non-evaluable (blank in the matrix), because a single code

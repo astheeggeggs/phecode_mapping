@@ -197,3 +197,28 @@ def test_two_dates_gives_the_same_answer_in_every_machine_timezone(tmp_path: Pat
         results[zone] = proc.stdout.strip()
     assert len(set(results.values())) == 1, f"case set depends on the machine timezone: {results}"
     assert "2" in results["UTC"], f"fixture no longer produces two distinct UTC dates: {results}"
+
+
+def test_two_dates_refuses_an_event_date_column_that_is_entirely_empty(tmp_path: Path) -> None:
+    """A column's presence is not the presence of dates.
+
+    An all-empty event_date satisfies "two-dates requires event_date" and has nothing
+    unparseable in it, so both existing guards passed -- and then every person had zero
+    distinct dates and the matrix came out empty from a rule that never had any dates
+    to apply.
+    """
+    from phecodex_mapper.vocabulary import build_vocabulary
+    source = tmp_path / "m.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "123.4", "ICD9CM"]])
+    info = tmp_path / "i.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"], [["CV_003", "Both", "X", "Y"]])
+    release = tmp_path / "rel"
+    build_vocabulary(source, info, release, None)
+
+    cohort, events = tmp_path / "c.csv", tmp_path / "e.csv"
+    write_csv(cohort, ["person_id", "sex"], [["p1", "Female"], ["p2", "Female"]])
+    write_csv(events, ["person_id", "code", "vocabulary", "event_date"],
+              [["p1", "123.4", "ICD9CM", ""], ["p1", "123.4", "ICD9CM", ""]])
+    with pytest.raises(ValueError, match="every event_date is empty"):
+        map_phecodes(release, cohort, events, tmp_path / "out", case_rule="two-dates",
+                     min_cases=1, min_controls=1)
