@@ -7,7 +7,10 @@ biobank; participant-level data never needs to leave the secure environment.
 **If you are an analyst running a release someone sent you**, you need four sections:
 [Install](#install), [Standard workflow](#standard-workflow),
 [Input contract](#input-contract) and [Outputs](#outputs) — then
-[Quality control](#quality-control) once you have a run.
+[Quality control](#quality-control) once you have a run. If something goes wrong,
+[When a run refuses to start](#when-a-run-refuses-to-start) and
+[When a run succeeds but the numbers look wrong](#when-a-run-succeeds-but-the-numbers-look-wrong)
+cover what you are likely to hit.
 [How many phenotypes will I get?](#how-many-phenotypes-will-i-get) is worth reading
 before you plan the analysis. [ANALYST_GUIDE.md](ANALYST_GUIDE.md)
 covers UK Biobank extraction, containers, and the two checks worth running once.
@@ -59,7 +62,11 @@ recorded at build time, and refuses a release carrying an unrecorded file the ma
 would read. Step 2 catches the input problems that otherwise complete "successfully"
 with nothing mapped.
 
-The command refuses to overwrite an existing output directory.
+`run` refuses to overwrite an existing output directory. On a 500,000-person cohort it
+takes a few minutes and wants about 16 GB of memory — see
+[ANALYST_GUIDE.md](ANALYST_GUIDE.md) for measured figures. If a command stops with an
+error, [When a run refuses to start](#when-a-run-refuses-to-start) lists what each
+refusal means.
 
 **Phenotype exclusions are applied by default.** `run` drops the bundled recommended
 set — `Symptoms`, `Neonatal`, `Infections`, and three administrative
@@ -294,6 +301,43 @@ This is a plausibility comparison, not an exact expected-count test. The
 report flags denominator, ancestry, sex-stratum, version, and missing-trait
 differences for manual review. Never export participant-level records from
 an external resource for this comparison.
+
+## When a run refuses to start
+
+Most refusals are the tool declining to produce a plausible-looking wrong answer.
+Match the message you got against the left column; the fix is usually in your input
+files rather than in the command.
+
+| the message says | what it means | what to do |
+|---|---|---|
+| `Release directory does not exist` or `Release is incomplete; missing:` | `--release` is not pointing at a release directory | inside an extracted bundle the directory is called `release` |
+| `manifest.json records no artifact checksums` | the release predates checksummed builds and its contents cannot be verified | ask whoever sent it for a release rebuilt with a current `build-vocabulary` |
+| `snomed_map.parquet is present … not recorded in manifest.json` | the release carries a file it does not claim | run `scripts/verify_release.py`; do not use the release until it passes |
+| `Output directory already exists` | runs never overwrite | remove it, or pass a new `--output` |
+| `Cohort person_id must be non-null and unique` | blank or duplicated identifiers | de-duplicate; one row per person |
+| `cohort sex must be Male, Female, or blank` | some other token (`M`, `1`, `Unknown`) | recode. Blank is allowed and makes a person non-evaluable for sex-restricted phecodes; anything else is refused |
+| `cohort has no usable sex values` | the column is present but nothing in it is `Male` or `Female` | check the encoding before going further — every sex-restricted phecode would otherwise be scored against nobody |
+| `events 'code' column has type …; it must be text` | a Parquet events file with a numeric `code` | re-export `code` as text. A numeric column loses leading zeros (`001`→`1`) and turns `250.00` into `250.0`, which normalizes to a *different real ICD-9 code* |
+| `cohort person_id is … but events person_id is …` | the two files type `person_id` differently | export both as the same type, so the join does not depend on coercion |
+| `none of the … event rows match a person in the cohort` | the files describe different populations, or use different id formats | check a few ids by eye from each file |
+| `events contain unsupported vocabularies` | a label outside `ICD9CM`, `ICD10`, `ICD10CM`, `SNOMED` | fix the `vocabulary` column — and see [which ICD-10 you have](#you-must-state-which-icd-10-you-are-mapping) |
+| `--case-rule two-dates requires parseable dates` | a non-ISO date somewhere | convert `event_date` to `YYYY-MM-DD` |
+| `--case-rule two-dates was requested but every event_date is empty` | the column exists but holds no dates | supply dated events, or use the default `--case-rule any-event` |
+| `--exclude-phenotypes has … a blank match_value` | a blank cell in an exclusions file | fill the cell or delete the row — see [Exclusion files](#exclusion-files-must-not-have-blank-cells) |
+| `--exclude-phenotypes has a 'category' rule, but this release … has no 'category'` | the release was built without `--phecodex-info`, so it carries no categories | ask for a release rebuilt with `--phecodex-info`; category rules cannot work without one |
+
+## When a run succeeds but the numbers look wrong
+
+Everything here is a completed run. Each is a case where the output is legitimate but
+easy to misread, so check the named field before concluding anything about the data.
+
+| what you see | check | reading |
+|---|---|---|
+| the matrix has no columns | the stderr warning, which names the largest case and control count reached | a threshold outcome, not a failure. The bundled `examples/` files are two people and always produce this |
+| ~20% of events unmapped on a UK Biobank extract | `share_of_unmapped_rescued_by_sibling` in `audit.json` | near 1% means correctly labelled; PhecodeX's WHO map is simply coarse. Do **not** relabel on the rate alone |
+| a sex-specific phenotype scored against everyone | `sex.release_has_sex_metadata` | false means *no* phecode is restricted; the release was built without `--phecodex-info` |
+| an exclusion policy appears to do nothing | `control_exclusions.unmatched_rules`, `exclude_phenotypes.unmatched_*_rules` | a rule that matched nothing removed nobody. Phecode matching is case-sensitive |
+| fewer events than your file contains | `events` against `events_in_file` | the difference is events whose `person_id` is not in the cohort, counted in `events_for_unknown_people` |
 
 ## How many phenotypes will I get?
 
@@ -617,10 +661,14 @@ redistributing. On the 1.1 release that is 120 of 1,939 assignments (6.2%); the 
 content. If your site is not licensed to redistribute SNOMED-derived knowledge, that
 number is the part to discuss with your data-access team.
 
-`--phecodex-info` is optional; omitting it ships a phecode-only info table so the
-release still verifies, but the map then carries **no sex restrictions at all** and
-every sex-specific phecode is scored against the whole cohort. `audit.json` reports
-`release_has_sex_metadata: false` when that happens. For any real analysis, supply it.
+`--phecodex-info` is optional only in the narrow sense that the build succeeds without
+it. **A release built without it cannot be used by the documented `run` workflow at
+all**: `run` applies the bundled recommended exclusions by default, those are category
+rules, and a release with no info table has no `category` column to match them against,
+so the run stops with `--exclude-phenotypes has a 'category' rule, but this release has
+no phecode_info.parquet`. Such a release also carries **no sex restrictions**, so every
+sex-specific phecode is scored against the whole cohort and `audit.json` reports
+`release_has_sex_metadata: false`. Supply it for any release anyone will actually run.
 
 Builds are byte-reproducible: two builds from identical inputs produce identical
 artefacts and therefore identical checksums, so federated sites can compare

@@ -111,6 +111,38 @@ To specify the bundled policy explicitly:
   --output phecodex_run
 ```
 
+## How long it takes, and how much memory
+
+Ask for the memory before you queue the job. Mapping is done in DuckDB, which is
+memory-hungry by design, and the run is the only step that needs a substantial machine.
+
+Measured end to end on a 500,000-person cohort with 2,600,000 events against a real
+two-vocabulary release, on 8 cores at 2.0 GHz:
+
+| step | wall time | peak memory | output |
+|---|---:|---:|---|
+| `build-vocabulary` (maintainers only) | 45 s | 0.2 GB | — |
+| `run` (500k people, 2.6M events) | 3.7 min | 5.0 GB | 41 MB |
+
+Practical guidance:
+
+- **Ask for 16 GB.** Peak resident memory was 5 GB, and the OS reported a 9.5 GB peak
+  footprint once mapped and compressed pages are counted. DuckDB will spill to disk on
+  a smaller machine rather than fail, so a 8 GB node usually still finishes — slower.
+- **Time scales with events, memory with cohort size × retained phecodes**, because the
+  phenotype matrix is people × traits. Halving the cohort roughly halves both.
+- **Budget disk for about 50 MB of outputs** at this scale, dominated by
+  `phenotype_matrix` in its two formats and `person_phecodes.parquet`.
+- `verify_release.py`, preflight, and the QC scripts are all seconds and need no
+  particular resources.
+
+The cohort here is synthetic — real identifiers never left their environment — with
+codes drawn from the release's own WHO ICD-10 vocabulary on a skewed distribution, so
+a few codes are common and most are rare. Runtime and memory are driven by row counts
+and column cardinality rather than by which specific codes appear, so these figures
+should transfer; the retained-phenotype count from a synthetic draw should not be read
+as a prediction of yours (see the README's attrition curve for that).
+
 ## UK Biobank extraction
 
 Run this inside the approved secure environment. Its outputs are individual-level and
