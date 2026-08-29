@@ -222,3 +222,47 @@ def test_two_dates_refuses_an_event_date_column_that_is_entirely_empty(tmp_path:
     with pytest.raises(ValueError, match="every event_date is empty"):
         map_phecodes(release, cohort, events, tmp_path / "out", case_rule="two-dates",
                      min_cases=1, min_controls=1)
+
+
+def test_two_dates_is_two_distinct_dates_whatever_the_codes(tmp_path: Path) -> None:
+    """The rule as documented: the phecode must be evidenced on two separate days.
+
+    Two different codes mapping to the phecode count, and so does the same code twice.
+    What never counts is two codes on a single date. This is the table in the README's
+    input-contract section, asserted rather than described.
+    """
+    from phecodex_mapper.vocabulary import build_vocabulary
+    import gzip
+
+    source = tmp_path / "m.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"],
+              [["CV_401", "I10", "ICD10"], ["CV_401", "I11", "ICD10"]])
+    info = tmp_path / "i.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"],
+              [["CV_401", "Both", "Hypertension", "Cardiovascular"]])
+    release = tmp_path / "rel"
+    build_vocabulary(source, info, release, None)
+
+    people = ["two_codes_two_dates", "two_codes_one_date", "same_code_two_dates",
+              "one_code_one_date", "none"]
+    cohort, events = tmp_path / "c.csv", tmp_path / "e.csv"
+    write_csv(cohort, ["person_id", "sex"], [[p, "Female"] for p in people])
+    write_csv(events, ["person_id", "code", "vocabulary", "event_date"], [
+        ["two_codes_two_dates", "I10", "ICD10", "2010-01-01"],
+        ["two_codes_two_dates", "I11", "ICD10", "2015-06-30"],
+        ["two_codes_one_date", "I10", "ICD10", "2011-02-02"],
+        ["two_codes_one_date", "I11", "ICD10", "2011-02-02"],
+        ["same_code_two_dates", "I10", "ICD10", "2012-03-03"],
+        ["same_code_two_dates", "I10", "ICD10", "2018-09-09"],
+        ["one_code_one_date", "I10", "ICD10", "2013-04-04"],
+    ])
+    out = tmp_path / "run"
+    map_phecodes(release, cohort, events, out, case_rule="two-dates", min_cases=1, min_controls=1)
+
+    matrix = dict(line.split(",") for line in
+                  gzip.open(out / "phenotype_matrix.csv.gz", "rt").read().splitlines()[1:])
+    assert matrix["two_codes_two_dates"] == "1"
+    assert matrix["same_code_two_dates"] == "1"
+    assert matrix["two_codes_one_date"] == "", "two codes on one day is one date, not two"
+    assert matrix["one_code_one_date"] == "", "a single occurrence is ambiguous, not a control"
+    assert matrix["none"] == "0"

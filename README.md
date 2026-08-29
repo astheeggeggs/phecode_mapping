@@ -97,16 +97,30 @@ unparseable dates as absent. A column present but entirely empty is refused too 
 presence of a column is not the presence of dates, and it would otherwise yield zero
 cases from a rule that had no dates to apply.
 
-**On UK Biobank, know what `two-dates` measures.** `prepare_ukb_for_mapping.R` takes
-dates from UKB's parallel date arrays (41280 for the 41270 ICD-10 diagnoses, 41281 for
-41271), matched by array index. But 41280 records the date a code was *first* recorded,
-so each (person, code) pair carries exactly one date. A person is therefore a two-dates
-case when **two different codes mapping to the same phecode were first recorded on
-different days** — not when the same code appears at two separate visits, which the wide
-extract cannot express. That is stricter than `any-event` and looser than "two
-encounters". For genuine per-episode dates you need the HES episode tables
-(`hesin`/`hesin_diag`). Events from the cancer-registry and death-cause fields are
-emitted undated and simply do not contribute a date.
+The rule is **two distinct dates among the events mapping to that phecode**. The codes
+need not be the same one twice, and need not be different — what counts is that the
+phecode is evidenced on two separate days:
+
+| the person's history | verdict |
+|---|---|
+| two codes mapping to the phecode, on different dates | **case** |
+| the same code twice, on different dates | **case** |
+| two codes mapping to the phecode, both on one date | non-evaluable |
+| one code on one date | non-evaluable |
+| no code for the phecode | control |
+
+A single dated occurrence is deliberately neither case nor control — it is ambiguous
+evidence, not evidence of absence — and `phecode_counts` reports those people under
+`subthreshold_control_count`.
+
+**On UK Biobank.** `prepare_ukb_for_mapping.R` takes dates from UKB's parallel date
+arrays (41280 for the 41270 ICD-10 diagnoses, 41281 for 41271), matched by array index.
+41280 records when a code was *first* recorded, so each (person, code) pair carries one
+date — which means on this source the rule resolves to the first row of the table above:
+two different codes for the phecode, first recorded on different days. The same code at
+two separate admissions is not distinguishable in the wide extract; if you need
+per-episode granularity, that lives in the HES episode tables (`hesin`/`hesin_diag`).
+Cancer-registry and death-cause events are emitted undated and contribute no date.
 
 Under `two-dates`, a person carrying a phecode on only one date is neither a case
 nor a control: they are non-evaluable (blank in the matrix), because a single code
