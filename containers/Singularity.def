@@ -13,6 +13,7 @@ From: python:3.11-slim
     scripts/package_distribution.py /opt/phecodex/scripts/package_distribution.py
     scripts/check_prevalence.py /opt/phecodex/scripts/check_prevalence.py
     scripts/check_deidentification.py /opt/phecodex/scripts/check_deidentification.py
+    scripts/deidentify_ukb_for_testing.R /opt/phecodex/scripts/deidentify_ukb_for_testing.R
 
 %post
     cd /opt/phecodex

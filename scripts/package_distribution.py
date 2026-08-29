@@ -32,7 +32,7 @@ root = Path(__file__).resolve().parents[1]
 # tests/test_distribution.py derives that list from the docs themselves, so adding a
 # documented command without bundling its script fails the suite.
 files = [root / "LICENSE", root / "README.md", root / "ANALYST_GUIDE.md", root / "pyproject.toml", root / "requirements-lock.txt", root / "examples/cohort.csv", root / "examples/events.csv", root / "scripts/verify_release.py", root / "scripts/package_distribution.py",
-         root / "scripts/prepare_ukb_for_mapping.R", root / "scripts/plot_phecode_attrition.py", root / "scripts/check_prevalence.py", root / "scripts/check_deidentification.py", root / "containers/Dockerfile", root / "containers/.dockerignore", root / "containers/Singularity.def"]
+         root / "scripts/prepare_ukb_for_mapping.R", root / "scripts/plot_phecode_attrition.py", root / "scripts/check_prevalence.py", root / "scripts/check_deidentification.py", root / "scripts/deidentify_ukb_for_testing.R", root / "containers/Dockerfile", root / "containers/.dockerignore", root / "containers/Singularity.def"]
 files += list((root / "src").rglob("*.py"))
 files += list((root / "src/phecodex_mapper/data").glob("*.csv"))
 args.output.parent.mkdir(parents=True, exist_ok=True)
