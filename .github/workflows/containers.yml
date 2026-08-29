@@ -74,3 +74,58 @@ jobs:
             python -c "import json; a = json.load(open(\"/tmp/run/audit.json\")); \
               print(\"events:\", a[\"events\"], \"matrix columns:\", a[\"phenotype_matrix\"][\"n_columns\"]); \
               assert a[\"events\"] == 2, a[\"events\"]"'
+
+  apptainer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: eWaterCycle/setup-apptainer@v2
+        with:
+          apptainer-version: 1.3.6
+
+      - name: Build the Apptainer image
+        # containers/Singularity.def had never been built by anything -- the suite only
+        # grepped it for script names. Sites on HPC run this path rather than Docker,
+        # because unprivileged Docker is usually unavailable on a cluster, so it is the
+        # path most likely to be used and was the one with no coverage at all.
+        run: sudo apptainer build phecodex-mapper.sif containers/Singularity.def
+
+      - name: Runscript works
+        run: apptainer run phecodex-mapper.sif --help
+
+      - name: Default exclusions policy is inside the image
+        run: |
+          apptainer exec phecodex-mapper.sif python -c \
+            "import importlib.resources as r, sys; \
+             p = r.files('phecodex_mapper') / 'data' / 'recommended_exclusions.csv'; \
+             sys.exit('recommended_exclusions.csv missing from image') if not p.is_file() else None; \
+             print(p.read_text().strip().splitlines()[0])"
+
+      - name: No licensed or participant-level directory in the image
+        run: |
+          apptainer exec phecodex-mapper.sif sh -c '
+            for d in athena scratchpad_ukb releases runs reports distributions hierarchy_sources; do
+              if [ -e "/opt/phecodex/$d" ]; then echo "LEAK: $d is in the image"; exit 1; fi
+            done
+            echo "no licensed or generated directory present"'
+
+      - name: Bundled examples run end to end, from inside the image
+        # Absolute /opt/phecodex paths on purpose. Apptainer binds the host working
+        # directory by default, so a relative examples/ path would read the checkout
+        # rather than the image and prove nothing about what was packaged. Outputs go
+        # to $HOME, which is writable; the image itself is read-only.
+        run: |
+          apptainer exec phecodex-mapper.sif sh -c '
+            set -e
+            work=$(mktemp -d)
+            printf "phecode,ICD,vocabulary_id\nAA_1,A01.1,ICD10\nBB_2,123.4,ICD9CM\n" > "$work/map.csv"
+            printf "phecode,sex,category,phecode_string\nAA_1,Both,Infectious,Example A\nBB_2,Both,Circulatory,Example B\n" > "$work/info.csv"
+            phecodex-map build-vocabulary --phecodex-map "$work/map.csv" --phecodex-info "$work/info.csv" --output "$work/release"
+            phecodex-map run --release "$work/release" \
+              --cohort /opt/phecodex/examples/cohort.csv \
+              --events /opt/phecodex/examples/events.csv \
+              --output "$work/run"
+            python -c "import json, sys; a = json.load(open(sys.argv[1])); \
+              print(\"events:\", a[\"events\"], \"matrix columns:\", a[\"phenotype_matrix\"][\"n_columns\"]); \
+              assert a[\"events\"] == 2, a[\"events\"]" "$work/run/audit.json"'
