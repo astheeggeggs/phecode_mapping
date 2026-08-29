@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Environment (Python >= 3.11)
 python -m venv .venv && .venv/bin/pip install -r requirements-lock.txt && .venv/bin/pip install -e '.[test]'
 
-# Tests: 257 tests, ~140s. Tests that shell out to Rscript skip when it is absent.
+# Tests: 268 tests, ~155s. Tests that shell out to Rscript skip when it is absent.
 .venv/bin/pytest -q
 .venv/bin/pytest tests/test_case_rule.py -q                    # one module
 .venv/bin/pytest tests/test_case_rule.py::test_name -q          # one test

@@ -15,9 +15,11 @@ S14 package_release.py rewrote manifest.json to add a `bundle_contents` key. Tha
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
+import sysconfig
 import tarfile
 from pathlib import Path
 
@@ -25,6 +27,21 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_RE = re.compile(r"scripts/[A-Za-z0-9_]+\.(?:py|R)")
+
+
+def bundle_python(root: Path) -> tuple[list[str], dict[str, str]]:
+    """Run a bundled script so that ONLY the bundle can satisfy `import phecodex_mapper`.
+
+    Setting PYTHONPATH to the bundle's src/ is not enough, and for as long as these
+    tests did that they could not fail: the repo is installed editable, so
+    site-packages carries a .pth naming <repo>/src and every import resolved there
+    whatever the bundle contained. `-S` skips site altogether -- and with it the .pth
+    -- so the third-party packages the scripts need are put back on PYTHONPATH
+    explicitly, and nothing else is.
+    """
+    site = sorted({sysconfig.get_paths()[k] for k in ("purelib", "platlib")})
+    env = {"PYTHONPATH": os.pathsep.join([str(root / "src"), *site]), "PATH": "/usr/bin:/bin"}
+    return [sys.executable, "-S"], env
 
 
 def documented_scripts() -> set[str]:
@@ -85,9 +102,10 @@ def test_bundled_scripts_run_from_the_extracted_bundle(tmp_path: Path, full_rele
     with tarfile.open(bundle, "r:gz") as archive:
         archive.extractall(extracted)
     root = extracted / "phecodex-distribution"
+    python, env = bundle_python(root)
     result = subprocess.run(
-        [sys.executable, str(root / "scripts" / "verify_release.py"), "--release", str(root / "release")],
-        capture_output=True, text=True, env={"PYTHONPATH": str(root / "src"), "PATH": "/usr/bin:/bin"})
+        [*python, str(root / "scripts" / "verify_release.py"), "--release", str(root / "release")],
+        capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "ok"
 
@@ -100,6 +118,9 @@ def test_every_bundled_python_script_starts_from_the_bundle(tmp_path: Path, full
     the package importable -- it ships src/ and the docs say `pip install .` -- so an
     import that resolves in the repo but not in the bundle would ship a broken tool. A
     --help run is enough: it executes every module-level import.
+
+    Runs under bundle_python, without which the repo's editable install answers every
+    import and this test passes on a bundle shipping no src/ at all.
     """
     bundle = tmp_path / "dist.tar.gz"
     subprocess.run(
@@ -113,11 +134,11 @@ def test_every_bundled_python_script_starts_from_the_bundle(tmp_path: Path, full
 
     scripts = sorted(s for s in documented_scripts() if s.endswith(".py"))
     assert len(scripts) > 1, f"expected several bundled python scripts, found {scripts}"
+    python, env = bundle_python(root)
     broken = {}
     for script in scripts:
         result = subprocess.run(
-            [sys.executable, str(root / script), "--help"], capture_output=True, text=True,
-            env={"PYTHONPATH": str(root / "src"), "PATH": "/usr/bin:/bin"})
+            [*python, str(root / script), "--help"], capture_output=True, text=True, env=env)
         if result.returncode != 0:
             broken[script] = result.stderr.strip().splitlines()[-1:]
     assert broken == {}, f"bundled scripts that cannot start: {broken}"

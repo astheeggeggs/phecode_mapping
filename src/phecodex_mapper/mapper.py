@@ -9,7 +9,8 @@ from openpyxl import Workbook
 
 from .diagnostics import unmapped_by_vocabulary
 from .io import ANALYSIS_TIMEZONE, checksum, connect, pin_workbook_timestamps, quote, relation_for
-from .retention import eligible_count_sql, evaluable_predicate, retained_sql
+from .retention import (
+    eligible_count_sql, evaluable_predicate, restriction_query_sql, retained_sql)
 
 
 def _columns(con, source: str) -> set[str]:
@@ -300,11 +301,10 @@ def _load_phecode_sex(con, release: Path) -> dict:
         info_view = f"read_parquet('{quote(info_path)}')"
         if {"phecode", "sex"} <= _columns(con, info_view):
             release_has_sex = True
-            con.execute(f"""
-              INSERT INTO phecode_sex
-              SELECT phecode, upper(trim(sex)) FROM {info_view}
-              WHERE upper(trim(sex)) IN ('MALE', 'FEMALE')
-            """)
+            # retention.restriction_query_sql, not a local `upper(trim(sex))`: the
+            # attrition tooling reads the same column through that function, and two
+            # spellings of the same canonicalisation is how they came to disagree.
+            con.execute(f"INSERT INTO phecode_sex {restriction_query_sql(info_view)}")
     con.execute("""
       CREATE TABLE cohort_sex_counts AS
       SELECT count(*) AS n_all,

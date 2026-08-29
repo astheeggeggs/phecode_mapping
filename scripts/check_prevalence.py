@@ -118,9 +118,16 @@ def main() -> None:
         if phecode not in matrix_columns:
             print(f"  {phecode:10s} not retained in this run")
             continue
+        # CAST both sides to VARCHAR, as mapper.py does when it builds `cohort` and the
+        # matrix. USING (person_id) leaves the comparison type to DuckDB, which for a
+        # Parquet cohort with an integer person_id against the matrix's VARCHAR column
+        # resolves the other way -- '007' and 7 would match here and not in the run. The
+        # sharpest check in this script must not be joining on different semantics from
+        # the thing it is checking.
         wrong = con.execute(f"""
-          SELECT count(*) FROM matrix m JOIN cohort c USING (person_id)
-          WHERE m."{phecode}" IS NOT NULL AND upper(trim(c.sex)) <> upper(?)
+          SELECT count(*) FROM matrix m
+          JOIN cohort c ON CAST(c.person_id AS VARCHAR) = CAST(m.person_id AS VARCHAR)
+          WHERE m."{phecode}" IS NOT NULL AND upper(trim(CAST(c.sex AS VARCHAR))) <> upper(?)
         """, [expected_sex]).fetchone()[0]
         scored = con.execute(
             f'SELECT count(*) FROM matrix WHERE "{phecode}" IS NOT NULL').fetchone()[0]

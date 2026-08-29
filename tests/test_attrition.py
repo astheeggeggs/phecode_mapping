@@ -268,6 +268,7 @@ def test_the_reconciler_names_the_phecodes_behind_a_discrepancy(tmp_path: Path) 
     assert "all three agree" not in result.stdout
     assert "the CURVE keeps but the RUN dropped" in result.stdout
     assert "PH_000" in result.stdout
+    assert "absent from phecode_counts" in result.stdout
 
 
 def _divergence_fixture(tmp_path: Path, *, case_rule: str, control_exclusions: bool):
@@ -345,7 +346,8 @@ def test_the_reconciler_attributes_a_control_exclusion_gap(tmp_path: Path) -> No
     # 30 curve controls, 15 run controls, all 15 removed as excluded non-cases.
     row = next(line for line in out.splitlines() if "CV_003" in line and "Both" in line)
     assert row.split() == ["CV_003", "Both", "10", "30", "15", "+15", "0", "15"], row
-    assert "NOT explained by the known removals" not in out
+    assert "gap NOT accounted for" not in out
+    assert "absent from phecode_counts" not in out
 
 
 def test_the_reconciler_attributes_a_two_dates_subthreshold_gap(tmp_path: Path) -> None:
@@ -363,7 +365,8 @@ def test_the_reconciler_attributes_a_two_dates_subthreshold_gap(tmp_path: Path) 
     row = next(line for line in out.splitlines() if "CV_003" in line and "Both" in line)
     # Same +15 gap, attributed to sub-threshold carriers rather than exclusions.
     assert row.split() == ["CV_003", "Both", "10", "30", "15", "+15", "15", "0"], row
-    assert "NOT explained by the known removals" not in out
+    assert "gap NOT accounted for" not in out
+    assert "absent from phecode_counts" not in out
 
 
 def test_the_curve_and_the_run_agree_when_nothing_is_removed(tmp_path: Path) -> None:
@@ -373,3 +376,168 @@ def test_the_curve_and_the_run_agree_when_nothing_is_removed(tmp_path: Path) -> 
     release, cohort, run = _divergence_fixture(tmp_path, case_rule="any-event",
                                                control_exclusions=False)
     assert "all three agree" in _reconcile(release, cohort, run)
+
+
+def _many_divergences_fixture(tmp_path: Path):
+    """17 divergent phecodes where the only ANOMALOUS one ranks last by case count.
+
+    Sixteen phecodes diverge for the documented, benign reason -- a --control-exclusions
+    rule removes 300 non-cases from each control pool, so the curve keeps what the run
+    drops -- with case counts 60 down to 45. PH_ABS diverges for a reason that cannot
+    arise in a single run (10 cases in person_phecodes, no phecode_counts row at all)
+    and has 10 cases, so it sorts seventeenth.
+
+    That ordering is the whole point: the verdict used to be computed from the LIMIT 15
+    display rows, so the one phecode worth warning about was the one the page cut off.
+    """
+    from conftest import write_csv
+    from phecodex_mapper.mapper import map_phecodes
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    codes = [[f"PH_{i:03d}", f"A{i:02d}.1", "ICD10CM"] for i in range(16)]
+    codes += [["PH_ABS", "B00.1", "ICD10CM"], ["SS_999", "Z00.0", "ICD10CM"]]
+    write_csv(tmp_path / "m.csv", ["phecode", "ICD", "vocabulary_id"], codes)
+    write_csv(tmp_path / "i.csv", ["phecode", "sex", "phecode_string", "category"],
+              [[f"PH_{i:03d}", "Both", f"P{i}", "Common"] for i in range(16)]
+              + [["PH_ABS", "Both", "Absent", "Symptoms"], ["SS_999", "Both", "S", "Common"]])
+    release = tmp_path / "rel"
+    build_vocabulary(tmp_path / "m.csv", tmp_path / "i.csv", release, None)
+
+    cohort = tmp_path / "c.csv"
+    write_csv(cohort, ["person_id", "sex"], [[f"p{i:03d}", "Female"] for i in range(400)])
+    events = [[f"p{j:03d}", f"A{i:02d}.1", "ICD10CM"] for i in range(16) for j in range(60 - i)]
+    events += [[f"p{j:03d}", "B00.1", "ICD10CM"] for j in range(10)]
+    # The excluded non-cases: disjoint from every phecode's cases, so each PH_i loses
+    # exactly these 300 from its control pool and nothing else muddies the arithmetic.
+    events += [[f"p{j:03d}", "Z00.0", "ICD10CM"] for j in range(100, 400)]
+    write_csv(tmp_path / "e.csv", ["person_id", "code", "vocabulary"], events)
+
+    cx = tmp_path / "cx.csv"
+    write_csv(cx, ["phecode", "exclusion_type", "exclusion_value", "vocabulary"],
+              [[f"PH_{i:03d}", "code", "Z00.0", "ICD10CM"] for i in range(16)])
+    drop = tmp_path / "drop.csv"
+    write_csv(drop, ["match_type", "match_value"], [["category", "Symptoms"]])
+
+    kw = dict(exclusions=cx, min_cases=5, min_controls=100)
+    map_phecodes(release, cohort, tmp_path / "e.csv", tmp_path / "with_drop",
+                 exclude_phenotypes=drop, **kw)
+    map_phecodes(release, cohort, tmp_path / "e.csv", tmp_path / "without_drop", **kw)
+
+    mixed = tmp_path / "mixed"
+    mixed.mkdir()
+    for name in ("audit.json", "phecode_counts.parquet"):
+        (mixed / name).write_bytes((tmp_path / "with_drop" / name).read_bytes())
+    (mixed / "person_phecodes.parquet").write_bytes(
+        (tmp_path / "without_drop" / "person_phecodes.parquet").read_bytes())
+    return release, cohort, mixed
+
+
+def test_the_verdict_covers_every_divergence_not_just_the_displayed_page(tmp_path: Path) -> None:
+    """A run whose only anomaly sorts below the display cut-off must still be flagged.
+
+    Kills: computing the verdict from the LIMIT 15 rows. Under that version this run
+    printed sixteen benignly-explained phecodes, no warning, and the all-clear
+    narrative, while PH_ABS -- the one phecode phecode_counts does not describe at all
+    -- went unmentioned because it happened to have the fewest cases.
+    """
+    release, cohort, mixed = _many_divergences_fixture(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/reconcile_attrition.py"),
+         "--run", str(mixed), "--release", str(release), "--cohort", str(cohort),
+         "--min-cases", "5", "--min-controls", "100"], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert "the CURVE keeps but the RUN dropped (17, 15 shown)" in out, out
+    # Cut off the header and the table: PH_ABS must be reported despite never appearing
+    # in the rows the analyst can see.
+    table = out.split("dropped (")[1].split("\n\n")[0]
+    assert "PH_ABS" not in table, "fixture no longer places the anomaly below the cut-off"
+    assert "absent from phecode_counts (1): ['PH_ABS']" in out, out
+
+
+def test_the_reconciler_refuses_a_cohort_the_run_was_not_produced_against(tmp_path: Path) -> None:
+    """A valid single run reconciled against the wrong cohort used to read as a tampered
+    directory: every denominator was computed from a population the run never saw, the
+    curve/run gap that produced was 'NOT explained by the known removals', and the script
+    named an assembled-from-two-runs cause it had no evidence for. audit.json already
+    carries the cohort's sex tallies, so the real cause is checkable before any of it."""
+    from conftest import write_csv
+    release, _, run = _divergence_fixture(tmp_path, case_rule="any-event",
+                                          control_exclusions=False)
+    other = tmp_path / "other_cohort.csv"
+    write_csv(other, ["person_id", "sex"],
+              [[f"p{i:03d}", "Female" if i % 2 else "Male"] for i in range(60)])
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/reconcile_attrition.py"),
+         "--run", str(run), "--release", str(release), "--cohort", str(other),
+         "--min-cases", "5", "--min-controls", "20"], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "is not the cohort this run was produced against" in result.stderr
+    assert "the CURVE keeps but the RUN dropped" not in result.stdout
+
+
+def test_the_reconciler_refuses_a_release_the_run_was_not_produced_against(tmp_path: Path) -> None:
+    """The sex restrictions -- and so every denominator -- come from --release. A
+    different release is the same class of error as a different cohort, and audit.json
+    records the manifest hash that settles it."""
+    from conftest import write_csv
+    from phecodex_mapper.vocabulary import build_vocabulary
+    release, cohort, run = _divergence_fixture(tmp_path, case_rule="any-event",
+                                               control_exclusions=False)
+    write_csv(tmp_path / "m2.csv", ["phecode", "ICD", "vocabulary_id"],
+              [["CV_003", "A01.1", "ICD10CM"]])
+    write_csv(tmp_path / "i2.csv", ["phecode", "sex", "phecode_string", "category"],
+              [["CV_003", "Female", "Now restricted", "Cardiovascular"]])
+    other = tmp_path / "rel2"
+    build_vocabulary(tmp_path / "m2.csv", tmp_path / "i2.csv", other, None)
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/reconcile_attrition.py"),
+         "--run", str(run), "--release", str(other), "--cohort", str(cohort),
+         "--min-cases", "5", "--min-controls", "20"], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "is not the release this run was produced against" in result.stderr
+
+
+def test_the_removal_columns_are_reported_as_overlapping_not_as_components(tmp_path: Path) -> None:
+    """sub and cxcl count the same person twice when both reasons apply to them.
+
+    Under two-dates the 15 single-date carriers of CV_003's own code are sub-threshold
+    for CV_003, and a --control-exclusions rule naming that same code marks those same
+    15 non-cases as excluded. The run removes 15 people once (noncase_excluded is a
+    UNION), so `removed` is 15 while sub and cxcl are each 15 -- read as a decomposition
+    that says 30 people were lost from a pool that lost 15.
+    """
+    from conftest import write_csv
+    from phecodex_mapper.mapper import map_phecodes
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    write_csv(tmp_path / "m.csv", ["phecode", "ICD", "vocabulary_id"],
+              [["CV_003", "A01.1", "ICD10CM"]])
+    write_csv(tmp_path / "i.csv", ["phecode", "sex", "phecode_string", "category"],
+              [["CV_003", "Both", "Unrestricted", "Cardiovascular"]])
+    release = tmp_path / "rel"
+    build_vocabulary(tmp_path / "m.csv", tmp_path / "i.csv", release, None)
+
+    cohort = tmp_path / "c.csv"
+    write_csv(cohort, ["person_id", "sex"],
+              [[f"p{i:03d}", "Female" if i % 2 else "Male"] for i in range(40)])
+    events = [[f"p{i:03d}", "A01.1", "ICD10CM", d]
+              for i in range(10) for d in ("2010-01-01", "2011-01-01")]
+    events += [[f"p{i:03d}", "A01.1", "ICD10CM", "2010-01-01"] for i in range(10, 25)]
+    write_csv(tmp_path / "e.csv", ["person_id", "code", "vocabulary", "event_date"], events)
+    cx = tmp_path / "cx.csv"
+    write_csv(cx, ["phecode", "exclusion_type", "exclusion_value", "vocabulary"],
+              [["CV_003", "code", "A01.1", "ICD10CM"]])
+
+    run = tmp_path / "run"
+    map_phecodes(release, cohort, tmp_path / "e.csv", run, case_rule="two-dates",
+                 exclusions=cx, min_cases=5, min_controls=20)
+    out = _reconcile(release, cohort, run)
+
+    row = next(line for line in out.splitlines() if "CV_003" in line and "Both" in line)
+    # 15 people removed once; both reasons apply to all 15, so sub + cxcl = 30.
+    assert row.split() == ["CV_003", "Both", "10", "30", "15", "+15", "15", "15"], row
+    assert "sub + cxcl >= removed" in out
+    assert "gap NOT accounted for" not in out
+    assert "absent from phecode_counts" not in out

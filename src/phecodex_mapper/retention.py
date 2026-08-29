@@ -75,16 +75,29 @@ def controls_from_evaluable(evaluable: int, case_count: int) -> int:
     return evaluable - case_count
 
 
-def load_phecode_restrictions(con, phecode_info_relation: str) -> dict[str, str]:
-    """{phecode: 'MALE'|'FEMALE'} for the phecodes a release genuinely restricts.
+def restriction_query_sql(relation: str) -> str:
+    """SQL: (phecode, restrict_sex) for the phecodes a release genuinely restricts.
 
-    Only genuinely restricted phecodes appear: 'Both', blank and unrecognised values
-    are absent, so a missing key means unrestricted, and `eligible_count`'s default
-    branch is reached by absence rather than by a value the CASE failed to match.
+    The third rule that was re-implemented per consumer. The mapper filled its
+    `phecode_sex` table with `upper(trim(sex))` while this module read the same
+    column as `upper(trim(CAST(sex AS VARCHAR)))`, so a release whose `sex` column
+    is not VARCHAR -- a Parquet ENUM, say -- could be canonicalised by one caller
+    and not the other, and the two would then disagree about which phecodes are
+    restricted while both claimed to be applying "the" rule. One spelling, here.
+
+    Only genuinely restricted phecodes come back: 'Both', blank, NULL and
+    unrecognised values are filtered out, so absence means unrestricted and
+    `eligible_count`'s default branch is reached by a missing row rather than by a
+    value the CASE failed to match.
     """
+    canonical = "upper(trim(CAST(sex AS VARCHAR)))"
+    return (f"SELECT phecode, {canonical} AS restrict_sex FROM {relation} "
+            f"WHERE {canonical} IN ('{MALE}', '{FEMALE}')")
+
+
+def load_phecode_restrictions(con, phecode_info_relation: str) -> dict[str, str]:
+    """{phecode: 'MALE'|'FEMALE'}, for Python consumers of `restriction_query_sql`."""
     columns = {row[0] for row in con.execute(f"DESCRIBE SELECT * FROM {phecode_info_relation}").fetchall()}
     if not {"phecode", "sex"} <= columns:
         return {}
-    return {row[0]: row[1] for row in con.execute(
-        f"SELECT phecode, upper(trim(CAST(sex AS VARCHAR))) FROM {phecode_info_relation} "
-        f"WHERE upper(trim(CAST(sex AS VARCHAR))) IN ('{MALE}', '{FEMALE}')").fetchall()}
+    return dict(con.execute(restriction_query_sql(phecode_info_relation)).fetchall())
