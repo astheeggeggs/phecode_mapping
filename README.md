@@ -504,11 +504,26 @@ artefacts and therefore identical checksums, so federated sites can compare
 written in a fixed order and the workbook's embedded timestamps are pinned.
 `manifest.json` itself is the one exception — it records `created_at_utc`.
 
+### Packaging a release for other sites
+
+Bundles a built release with the tool, the docs and the licence:
+
+```bash
+python scripts/package_distribution.py \
+  --release releases/phecodex-1.1-analyst \
+  --output distributions/phecodex-cm1.1-who1.0-icd-only.tar.gz
+```
+
+The release must be ICD-only — packaging refuses any release carrying SNOMED-derived
+tables, so build it with `--icd-only`. A `.sha256` sidecar is written alongside; send it
+separately from the archive so a recipient can check the download. Packaging never
+modifies the release it reads.
+
 Use the official [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary)
 for source maps and record their checksums. The release builder records source
 paths, versions, row counts, and checksums in `manifest.json`. See
-[ANALYST_GUIDE.md](ANALYST_GUIDE.md) for packaging, UK Biobank extraction,
-container execution, and downsampling examples. The lower-level
+[ANALYST_GUIDE.md](ANALYST_GUIDE.md) for UK Biobank extraction, cohort-size
+attrition, and container execution. The lower-level
 `map-phecodes` and `validate-phecodex` commands remain available for advanced
 users.
 

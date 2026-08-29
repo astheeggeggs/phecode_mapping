@@ -9,6 +9,8 @@ From: python:3.11-slim
     src /opt/phecodex/src
     scripts/verify_release.py /opt/phecodex/scripts/verify_release.py
     scripts/prepare_ukb_for_mapping.R /opt/phecodex/scripts/prepare_ukb_for_mapping.R
+    scripts/plot_phecode_attrition.py /opt/phecodex/scripts/plot_phecode_attrition.py
+    scripts/package_distribution.py /opt/phecodex/scripts/package_distribution.py
 
 %post
     cd /opt/phecodex

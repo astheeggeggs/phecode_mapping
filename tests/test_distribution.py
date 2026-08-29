@@ -358,3 +358,106 @@ def test_the_repo_declares_a_licence() -> None:
     text = (ROOT / "LICENSE").read_text()
     assert "MIT License" in text and "Copyright (c)" in text
     assert 'license = "MIT"' in (ROOT / "pyproject.toml").read_text()
+
+
+def test_the_attrition_script_runs_as_documented(tmp_path: Path) -> None:
+    """ANALYST_GUIDE now tells analysts to run this; nothing had ever executed it.
+
+    test_bundled_scripts_run_from_the_extracted_bundle checks --help. This runs the
+    documented invocation against real mapper output and checks the two files it
+    promises actually appear.
+    """
+    from conftest import write_csv
+    from phecodex_mapper.mapper import map_phecodes
+    from phecodex_mapper.vocabulary import build_vocabulary
+    import random
+
+    source = tmp_path / "m.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"],
+              [["CV_003", "I10", "ICD10CM"], ["GU_001", "A01.1", "ICD10CM"]])
+    info = tmp_path / "i.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"],
+              [["CV_003", "Both", "Hypertension", "CV"], ["GU_001", "Both", "Other", "GU"]])
+    release = tmp_path / "rel"
+    build_vocabulary(source, info, release, None)
+
+    rng = random.Random(5)
+    people = [[f"p{i:05d}", rng.choice(["Male", "Female"])] for i in range(600)]
+    cohort, events = tmp_path / "c.csv", tmp_path / "e.csv"
+    write_csv(cohort, ["person_id", "sex"], people)
+    write_csv(events, ["person_id", "code", "vocabulary"],
+              [[p[0], rng.choice(["I10", "A01.1"]), "ICD10CM"] for p in people])
+    run = tmp_path / "run"
+    map_phecodes(release, cohort, events, run, min_cases=5, min_controls=5)
+
+    out_csv, out_svg = tmp_path / "attrition.csv", tmp_path / "attrition.svg"
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/plot_phecode_attrition.py"),
+         "--cohort", str(cohort), "--person-phecodes", str(run / "person_phecodes.parquet"),
+         "--output-csv", str(out_csv), "--output-svg", str(out_svg),
+         "--sample-sizes", "100,300,600", "--min-cases", "5", "--min-controls", "5"],
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert out_svg.is_file() and out_svg.stat().st_size > 0
+    rows = out_csv.read_text().strip().splitlines()
+    assert rows[0].startswith("sample_size,retained_phecodes")
+    assert len(rows) == 4, f"expected a row per requested size, got {rows}"
+
+
+def test_sample_sizes_above_the_cohort_are_skipped_not_fabricated(tmp_path: Path) -> None:
+    """The flag's help promises this; a fabricated point would misread as real attrition."""
+    from conftest import write_csv
+    from phecodex_mapper.mapper import map_phecodes
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    source = tmp_path / "m2.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "I10", "ICD10CM"]])
+    info = tmp_path / "i2.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"], [["CV_003", "Both", "H", "CV"]])
+    release = tmp_path / "rel2"
+    build_vocabulary(source, info, release, None)
+    cohort, events = tmp_path / "c2.csv", tmp_path / "e2.csv"
+    write_csv(cohort, ["person_id", "sex"], [[f"p{i}", "Female"] for i in range(50)])
+    write_csv(events, ["person_id", "code", "vocabulary"], [[f"p{i}", "I10", "ICD10CM"] for i in range(50)])
+    run = tmp_path / "run2"
+    map_phecodes(release, cohort, events, run, min_cases=1, min_controls=1)
+
+    out_csv, out_svg = tmp_path / "a2.csv", tmp_path / "a2.svg"
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts/plot_phecode_attrition.py"),
+         "--cohort", str(cohort), "--person-phecodes", str(run / "person_phecodes.parquet"),
+         "--output-csv", str(out_csv), "--output-svg", str(out_svg),
+         "--sample-sizes", "10,50,100000", "--min-cases", "1", "--min-controls", "1"],
+        check=True, capture_output=True, text=True)
+    sizes = [line.split(",")[0] for line in out_csv.read_text().strip().splitlines()[1:]]
+    assert sizes == ["10", "50"], f"a size larger than the cohort was reported: {sizes}"
+
+
+def test_every_sample_size_above_the_cohort_leaves_a_readable_output(tmp_path: Path) -> None:
+    """Skipping all of them must not become a traceback from max() on an empty list."""
+    from conftest import write_csv
+    from phecodex_mapper.mapper import map_phecodes
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    source = tmp_path / "m3.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "I10", "ICD10CM"]])
+    info = tmp_path / "i3.csv"
+    write_csv(info, ["phecode", "sex", "phecode_string", "category"], [["CV_003", "Both", "H", "CV"]])
+    release = tmp_path / "rel3"
+    build_vocabulary(source, info, release, None)
+    cohort, events = tmp_path / "c3.csv", tmp_path / "e3.csv"
+    write_csv(cohort, ["person_id", "sex"], [[f"p{i}", "Female"] for i in range(20)])
+    write_csv(events, ["person_id", "code", "vocabulary"], [[f"p{i}", "I10", "ICD10CM"] for i in range(20)])
+    run = tmp_path / "run3"
+    map_phecodes(release, cohort, events, run, min_cases=1, min_controls=1)
+
+    out_csv, out_svg = tmp_path / "a3.csv", tmp_path / "a3.svg"
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/plot_phecode_attrition.py"),
+         "--cohort", str(cohort), "--person-phecodes", str(run / "person_phecodes.parquet"),
+         "--output-csv", str(out_csv), "--output-svg", str(out_svg),
+         "--sample-sizes", "5000,10000", "--min-cases", "1", "--min-controls", "1"],
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert out_csv.read_text().strip().splitlines()[1:] == [], "a skipped size produced a row"
+    assert out_svg.is_file() and "No sample size" in out_svg.read_text()

@@ -20,6 +20,14 @@ import duckdb
 def write_svg(path: Path, rows: list[dict], min_cases: int, min_controls: int) -> None:
     width, height, margin = 760, 500, 80
     points = [(int(r["sample_size"]), int(r["retained_phecodes"])) for r in rows]
+    if not points:
+        # Every requested size was skipped. max() over an empty sequence would raise
+        # here, turning "nothing to plot" into a traceback.
+        path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">'
+                        f'<rect width="100%" height="100%" fill="white"/>'
+                        f'<text x="{width // 2}" y="{height // 2}" text-anchor="middle" '
+                        f'font-family="sans-serif">No sample size was smaller than the cohort</text></svg>\n')
+        return
     xmax = max(x for x, _ in points) or 1
     ymax = max(y for _, y in points) or 1
     def xy(x: int, y: int) -> tuple[float, float]:
@@ -58,8 +66,14 @@ def main() -> None:
     rng.shuffle(shuffled)
     rows: list[dict] = []
     for requested in sorted({int(x) for x in args.sample_sizes.split(",") if x.strip()}):
-        n = min(requested, len(shuffled))
-        if n == 0: continue
+        # Skip, as --sample-sizes documents. Clamping to the cohort size instead emitted
+        # a SECOND row for the full cohort whenever an oversized value was passed --
+        # a duplicate point on the curve that reads as an extra measurement.
+        if requested > len(shuffled):
+            print(f"skipping --sample-sizes {requested}: larger than the cohort ({len(shuffled)})")
+            continue
+        n = requested
+        if n <= 0: continue
         selected = set(shuffled[:n])
         retained = sum(1 for case_people in by_phecode.values() if (cases_n := len(case_people & selected)) >= args.min_cases and n - cases_n >= args.min_controls)
         rows.append({"sample_size": n, "retained_phecodes": retained, "min_cases": args.min_cases, "min_controls": args.min_controls, "seed": args.seed})

@@ -111,6 +111,64 @@ To specify the bundled policy explicitly:
   --output phecodex_run
 ```
 
+## UK Biobank extraction
+
+Run this inside the approved secure environment. Its outputs are individual-level and
+must never leave that environment or be committed.
+
+```bash
+Rscript scripts/prepare_ukb_for_mapping.R \
+  --input ukb_wide_extract.csv \
+  --cohort-out cohort.csv.gz \
+  --events-out events.csv.gz \
+  --female-code 0 --male-code 1
+```
+
+`--female-code` and `--male-code` are required rather than assumed: the script reads
+genetic sex (field 22001), and a guessed encoding is silently wrong rather than loudly
+wrong. Both output paths must end in `.gz`.
+
+It reads hospital diagnoses from fields 41270 (ICD-10) and 41271 (ICD-9), falling back
+to 41202/41204 and 41203/41205 when those are absent, plus cancer registry (40006,
+40013) and death causes (40001, 40002). Event dates come from the parallel arrays 41280
+and 41281, matched by array index; the pairing is checked at run time and the script
+stops rather than mis-dating events if it does not hold. Cancer-registry and
+death-cause events are emitted undated.
+
+Events are labelled `ICD10` — **WHO ICD-10, which is what UK Biobank codes.** Pair them
+with a release built from `phecodeX_unrolled_ICD_WHO.csv`. See "You must state which
+ICD-10 you are mapping" above; mislabelling these as `ICD10CM` does not fail, it
+silently produces the wrong phenotypes.
+
+The script reports how many events carry a date. If none do, it omits the `event_date`
+column entirely, so `--case-rule two-dates` is refused rather than silently returning
+zero cases.
+
+> **Version.** UK Biobank is WHO ICD-10, and PhecodeX has published no WHO map for
+> version 1.1 — so a UKB run is phenotyped from **PhecodeX 1.0**, whatever the release
+> directory is called. Check `phecodex_upstream_versions` in the release's
+> `manifest.json` and describe it accurately in any methods section.
+
+## Cohort-size attrition
+
+How many phenotypes survive the retention thresholds at a given cohort size. Useful for
+deciding whether a planned subset is large enough to be worth running.
+
+```bash
+.venv/bin/python scripts/plot_phecode_attrition.py \
+  --cohort cohort.csv \
+  --person-phecodes phecodex_run/person_phecodes.parquet \
+  --output-csv attrition.csv --output-svg attrition.svg \
+  --sample-sizes 1000,5000,10000,50000,100000
+```
+
+It repeatedly downsamples the cohort and reapplies both thresholds. It is an aggregate
+QC tool and deliberately approximate: it uses the any-event case table and does **not**
+reproduce control exclusions or sex-specific denominators, so treat its counts as an
+upper bound rather than a prediction of a real run. Those limitations are recorded in
+the output metadata. The CSV and SVG are aggregate and safe to share where your data
+agreement permits; the inputs are not.
+
 ## Containers
 
 The repository includes `containers/Dockerfile` and
