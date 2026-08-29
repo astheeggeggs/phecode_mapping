@@ -85,41 +85,9 @@ The events file must contain one row per event:
 person_id,code,vocabulary,event_date
 ```
 
-`event_date` is optional for the default `any-event` rule, but required for
-`--case-rule two-dates`, which additionally requires every date to be ISO
-`YYYY-MM-DD`; a run refuses to start otherwise rather than silently treating
-unparseable dates as absent. A column present but entirely empty is refused too — the
-presence of a column is not the presence of dates, and it would otherwise yield zero
-cases from a rule that had no dates to apply.
-
-The rule is **two distinct dates among the events mapping to that phecode**. The codes
-need not be the same one twice, and need not be different — what counts is that the
-phecode is evidenced on two separate days:
-
-| the person's history | verdict |
-|---|---|
-| two codes mapping to the phecode, on different dates | **case** |
-| the same code twice, on different dates | **case** |
-| two codes mapping to the phecode, both on one date | non-evaluable |
-| one code on one date | non-evaluable |
-| no code for the phecode | control |
-
-A single dated occurrence is deliberately neither case nor control — it is ambiguous
-evidence, not evidence of absence — so those people are blank in the matrix and
-`phecode_counts` reports them as `subthreshold_control_count`.
-
-**On UK Biobank.** `prepare_ukb_for_mapping.R` takes dates from UKB's parallel date
-arrays (41280 for the 41270 ICD-10 diagnoses, 41281 for 41271), matched by array index.
-41280 records when a code was *first* recorded, so each (person, code) pair carries one
-date — which means on this source the rule resolves to the first row of the table above:
-two different codes for the phecode, first recorded on different days. The same code at
-two separate admissions is not distinguishable in the wide extract; if you need
-per-episode granularity, that lives in the HES episode tables (`hesin`/`hesin_diag`).
-Cancer-registry and death-cause events are emitted undated and contribute no date.
-
-Excluding the single-occurrence group from controls follows PheTK, whose control set
-excludes everyone with any occurrence of the phecode regardless of count. The default
-`any-event` rule is unaffected, since one event already makes a case.
+`event_date` is optional for the default `any-event` rule. It is required, and every
+date must be ISO `YYYY-MM-DD`, for `--case-rule two-dates` — see
+[Case rules](#case-rules).
 
 Supported vocabularies are `ICD9CM`, `ICD10`, `ICD10CM`, and `SNOMED`. Codes are
 normalized before matching. Events for people absent from the cohort are counted and
@@ -177,20 +145,11 @@ while `phecodeX_unrolled_ICD_UKB.csv` labels byte-identical content `ICD10CM`. A
 release built from the UKB file therefore expects `ICD10CM` events, and pairing it
 with correctly-labelled `ICD10` events leaves 98% of them unmapped.
 
-This is deliberate. The published PhecodeX map is already unrolled to leaf level
-wherever a phecode is assigned, so a code's absence from it is a curation decision
-rather than a gap to be filled. The unmapped branches are dominated by trauma
-sequelae, iatrogenic complications and status codes whose mapped ancestors are
-disease phenotypes — inferring them from a parent would assign, for example,
-"retained intraocular foreign body" to "Disorders of globe". Mapping exactly means
-every site reproduces the same result from the same published vocabulary, and a
-reviewer can check the mapping against
-[the PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary).
-
-Where the published map genuinely lags the current ICD release, the remedy is a
-curated, versioned supplement to the map — explicit and auditable — rather than
-run-time inference. Codes with no entry are reported in `unmapped_events.csv`;
-review that file rather than assuming a low unmapped rate means good coverage.
+Codes with no entry in the map are listed in `unmapped_events.csv`; review that file
+rather than assuming a low unmapped rate means good coverage. A code's absence is a
+curation decision rather than a gap the tool should fill, and the reasoning for
+matching exactly — with no inference from parent codes — is under
+[Mapping policy](#mapping-policy).
 
 ### Exclusion files must not have blank cells
 
@@ -214,6 +173,46 @@ that removes nobody leaves the people it was meant to exclude in the control poo
 which inflates every control denominator. Phecode identifiers are matched
 case-sensitively, so `gu_001` will not match `GU_001`; `--exclude-phenotypes` category
 names are matched case-insensitively, so `symptoms` does match `Symptoms`.
+
+## Case rules
+
+`--case-rule` decides what evidence makes someone a case. The default, `any-event`,
+needs no configuration and no dates: one mapped event makes a case, and anyone with no
+such event is a control. The rest of this section matters only if you pass
+`--case-rule two-dates`.
+
+`two-dates` requires **two distinct dates among the events mapping to that phecode**.
+The codes need not be the same one twice, and need not be different — what counts is
+that the phecode is evidenced on two separate days:
+
+| the person's history | verdict |
+|---|---|
+| two codes mapping to the phecode, on different dates | **case** |
+| the same code twice, on different dates | **case** |
+| two codes mapping to the phecode, both on one date | non-evaluable |
+| one code on one date | non-evaluable |
+| no code for the phecode | control |
+
+A single dated occurrence is deliberately neither case nor control — it is ambiguous
+evidence, not evidence of absence — so those people are blank in the matrix and
+`phecode_counts` reports them as `subthreshold_control_count`. Leaving them out of the
+controls follows PheTK, whose control set excludes everyone with any occurrence of the
+phecode regardless of count.
+
+Every date must be ISO `YYYY-MM-DD`. A run refuses to start otherwise, rather than
+silently treating an unparseable date as absent, and it also refuses an `event_date`
+column that is present but entirely empty — the presence of a column is not the
+presence of dates, and it would otherwise return zero cases from a rule that never had
+a date to apply.
+
+**On UK Biobank.** `prepare_ukb_for_mapping.R` takes dates from UKB's parallel date
+arrays (41280 for the 41270 ICD-10 diagnoses, 41281 for 41271), matched by array index.
+41280 records when a code was *first* recorded, so each (person, code) pair carries one
+date — which means on this source the rule resolves to the first row of the table above:
+two different codes for the phecode, first recorded on different days. The same code at
+two separate admissions is not distinguishable in the wide extract; if you need
+per-episode granularity, that lives in the HES episode tables (`hesin`/`hesin_diag`).
+Cancer-registry and death-cause events are emitted undated and contribute no date.
 
 ## Outputs
 
@@ -443,6 +442,20 @@ section; not needed to run anything.
 An event maps to a phecode only when its normalized code appears in the release's
 PhecodeX map for that vocabulary. There is no inference from parent codes, no
 string-prefix matching, and no cross-vocabulary fallback.
+
+This is deliberate. The published PhecodeX map is already unrolled to leaf level
+wherever a phecode is assigned, so a code's absence from it is a curation decision
+rather than a gap to be filled. The unmapped branches are dominated by trauma
+sequelae, iatrogenic complications and status codes whose mapped ancestors are
+disease phenotypes — inferring them from a parent would assign, for example,
+"retained intraocular foreign body" to "Disorders of globe". Mapping exactly means
+every site reproduces the same result from the same published vocabulary, and a
+reviewer can check the mapping against
+[the PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary).
+
+Where the published map genuinely lags the current ICD release, the remedy is a
+curated, versioned supplement to the map — explicit and auditable — rather than
+run-time inference.
 
 ### Recovering codes the published map omits
 
