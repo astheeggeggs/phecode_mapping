@@ -1,17 +1,25 @@
 # PhecodeX consortium mapper
 
-`phecodex-map` applies a versioned PhecodeX mapping release to cohort-level
-ICD events and produces a binary phenotype matrix plus aggregate QC outputs.
-Mapping is performed locally at each biobank; participant-level data does not
-need to leave the secure environment.
+Applies a versioned PhecodeX mapping release to cohort ICD events and produces a
+binary phenotype matrix plus aggregate QC outputs. Mapping runs locally at each
+biobank; participant-level data never needs to leave the secure environment.
 
-The recommended analyst path is the high-level `run` command. It validates the
-inputs, maps events by exact match against the published PhecodeX map, applies
-sex restrictions and thresholds, and records checksums and configuration in
-`audit.json`.
+**If you are an analyst running a release someone sent you**, you need four sections:
+[Install](#install), [Standard workflow](#standard-workflow),
+[Input contract](#input-contract) and [Outputs](#outputs) — then
+[Quality control](#quality-control) once you have a run. [ANALYST_GUIDE.md](ANALYST_GUIDE.md)
+covers UK Biobank extraction, containers, and the two checks worth running once.
+Everything below "What the map contains" is background you do not need to start.
 
-For detailed release-building, UK Biobank preparation, validation, and
-container instructions, see [ANALYST_GUIDE.md](ANALYST_GUIDE.md).
+**If you are building or distributing a release**, go to
+[For maintainers](#for-maintainers).
+
+Two things catch people out, both in the input contract, and neither fails loudly:
+
+| | |
+|---|---|
+| **State which ICD-10 you have.** `ICD10` (WHO) and `ICD10CM` are different vocabularies. UK Biobank is `ICD10`. | [detail](#you-must-state-which-icd-10-you-are-mapping) |
+| **A blank cell in an exclusions file voids the whole rule**, so blanks are refused rather than ignored. | [detail](#input-contract) |
 
 ## Install
 
@@ -28,50 +36,35 @@ see [ANALYST_GUIDE.md](ANALYST_GUIDE.md).
 
 ## Standard workflow
 
-Verify the supplied release before use:
+Three commands. `release` is the directory you were sent — inside an extracted
+analyst bundle it is literally called `release`.
 
 ```bash
-.venv/bin/python scripts/verify_release.py \
-  --release releases/phecodex-1.1
+# 1. Confirm the release is intact and is the one that was built for you.
+.venv/bin/python scripts/verify_release.py --release release
+
+# 2. Validate your inputs without mapping anything.
+.venv/bin/phecodex-map run --release release \
+  --cohort cohort.csv --events events.csv --output phecodex_run --preflight-only
+
+# 3. Map.
+.venv/bin/phecodex-map run --release release \
+  --cohort cohort.csv --events events.csv --output phecodex_run
 ```
 
-Validate inputs without mapping:
-
-```bash
-.venv/bin/phecodex-map run \
-  --release releases/phecodex-1.1 \
-  --cohort cohort.csv \
-  --events events.csv \
-  --output phecodex_run \
-  --preflight-only
-```
-
-Run the mapper:
-
-```bash
-.venv/bin/phecodex-map run \
-  --release releases/phecodex-1.1 \
-  --cohort cohort.csv \
-  --events events.csv \
-  --output phecodex_run
-```
+Step 1 is not a formality: it re-hashes every shipped file against the digests
+recorded at build time, and refuses a release carrying an unrecorded file the mapper
+would read. Step 2 catches the input problems that otherwise complete "successfully"
+with nothing mapped.
 
 The command refuses to overwrite an existing output directory.
-The standard workflow automatically applies the bundled recommended phenotype
-exclusions for `Symptoms`, `Neonatal`, `Infections`, and three administrative
-pregnancy-encounter phecodes. Supply `--exclude-phenotypes <file>` to use a
-reviewed alternative policy.
 
-To specify the bundled policy explicitly:
-
-```bash
-.venv/bin/phecodex-map run \
-  --release releases/phecodex-1.1 \
-  --cohort cohort.csv \
-  --events events.csv \
-  --exclude-phenotypes src/phecodex_mapper/data/recommended_exclusions.csv \
-  --output phecodex_run
-```
+**Phenotype exclusions are applied by default.** `run` drops the bundled recommended
+set — `Symptoms`, `Neonatal`, `Infections`, and three administrative
+pregnancy-encounter phecodes — so you get that policy whether or not you ask for it.
+To use a reviewed alternative, pass `--exclude-phenotypes <file>`; to see exactly
+what the default does, the file is
+[`src/phecodex_mapper/data/recommended_exclusions.csv`](src/phecodex_mapper/data/recommended_exclusions.csv).
 
 ## Input contract
 
@@ -110,8 +103,8 @@ phecode is evidenced on two separate days:
 | no code for the phecode | control |
 
 A single dated occurrence is deliberately neither case nor control — it is ambiguous
-evidence, not evidence of absence — and `phecode_counts` reports those people under
-`subthreshold_control_count`.
+evidence, not evidence of absence — so those people are blank in the matrix and
+`phecode_counts` reports them as `subthreshold_control_count`.
 
 **On UK Biobank.** `prepare_ukb_for_mapping.R` takes dates from UKB's parallel date
 arrays (41280 for the 41270 ICD-10 diagnoses, 41281 for 41271), matched by array index.
@@ -122,57 +115,19 @@ two separate admissions is not distinguishable in the wide extract; if you need
 per-episode granularity, that lives in the HES episode tables (`hesin`/`hesin_diag`).
 Cancer-registry and death-cause events are emitted undated and contribute no date.
 
-Under `two-dates`, a person carrying a phecode on only one date is neither a case
-nor a control: they are non-evaluable (blank in the matrix), because a single code
-is ambiguous evidence rather than evidence of absence. `phecode_counts` reports
-them as `subthreshold_control_count`. This follows PheTK, whose control set
-excludes everyone with any occurrence of the phecode regardless of count. The
-default `any-event` rule is unaffected, since one event already makes a case. Supported vocabularies are `ICD9CM`, `ICD10`,
-`ICD10CM`, and `SNOMED`. Codes are normalized before matching. Events for
-people absent from the cohort are reported during preflight.
+Excluding the single-occurrence group from controls follows PheTK, whose control set
+excludes everyone with any occurrence of the phecode regardless of count. The default
+`any-event` rule is unaffected, since one event already makes a case.
+
+Supported vocabularies are `ICD9CM`, `ICD10`, `ICD10CM`, and `SNOMED`. Codes are
+normalized before matching. Events for people absent from the cohort are counted and
+reported — see `events_for_unknown_people` in `audit.json`, and preflight will tell you
+before you run.
 
 For UK Biobank's wide phenotype export, use
 [`scripts/prepare_ukb_for_mapping.R`](scripts/prepare_ukb_for_mapping.R) in
 the secure environment. It requires explicit female and male encodings and
 writes compressed cohort and event files. Do not commit its outputs.
-
-## Outputs
-
-A run produces:
-
-```text
-phenotype_matrix.csv.gz
-phenotype_matrix.parquet
-phecode_counts.parquet
-eligible_phecodes.xlsx
-audit.json
-unmapped_events.csv
-```
-
-The matrix has one row per cohort person, a stable `person_id` column, and one
-column per retained PhecodeX trait. Values are `1` for cases, `0` for ordinary
-controls, and blank/NA when a person is not evaluable because of a sex
-restriction or control exclusion.
-
-Keep the matrix, unmapped events, and any person-level outputs in the secure
-environment. Share aggregate counts and `audit.json` only where permitted.
-The audit records release and input checksums, row and vocabulary counts,
-mapping mode, thresholds, sex handling, and unmapped-event rates. Four fields are
-worth checking on every run, because each records something that would otherwise be
-invisible:
-
-| field | why it matters |
-|---|---|
-| `events_in_file` vs `events` | the second is post-join. If they differ, events were dropped because their `person_id` is not in the cohort, and `unmapped_rate` describes only what survived |
-| `control_exclusions.unmatched_rules` | rules that removed no one. Matching is case-sensitive, so part of a policy can silently do nothing |
-| `sex.release_has_sex_metadata` | false means **no** phecode is sex-restricted and every sex-specific phenotype is scored against the whole cohort |
-| `analysis_timezone` | pinned to UTC. Two sites must resolve a timestamp to the same calendar date or `--case-rule two-dates` gives them different case sets |
-
-## Mapping policy
-
-An event maps to a phecode only when its normalized code appears in the release's
-PhecodeX map for that vocabulary. There is no inference from parent codes, no
-string-prefix matching, and no cross-vocabulary fallback.
 
 ### You must state which ICD-10 you are mapping
 
@@ -224,6 +179,180 @@ Where the published map genuinely lags the current ICD release, the remedy is a
 curated, versioned supplement to the map — explicit and auditable — rather than
 run-time inference. Codes with no entry are reported in `unmapped_events.csv`;
 review that file rather than assuming a low unmapped rate means good coverage.
+
+## Outputs
+
+A run produces:
+
+```text
+phenotype_matrix.csv.gz
+phenotype_matrix.parquet
+phecode_counts.parquet
+eligible_phecodes.xlsx
+audit.json
+unmapped_events.csv
+```
+
+The matrix has one row per cohort person, a stable `person_id` column, and one
+column per retained PhecodeX trait. Values are `1` for cases, `0` for ordinary
+controls, and blank/NA when a person is not evaluable because of a sex
+restriction or control exclusion.
+
+Keep the matrix, unmapped events, and any person-level outputs in the secure
+environment. Share aggregate counts and `audit.json` only where permitted.
+The audit records release and input checksums, row and vocabulary counts,
+mapping mode, thresholds, sex handling, and unmapped-event rates. Four fields are
+worth checking on every run, because each records something that would otherwise be
+invisible:
+
+| field | why it matters |
+|---|---|
+| `events_in_file` vs `events` | the second is post-join. If they differ, events were dropped because their `person_id` is not in the cohort, and `unmapped_rate` describes only what survived |
+| `control_exclusions.unmatched_rules` | rules that removed no one. Matching is case-sensitive, so part of a policy can silently do nothing |
+| `sex.release_has_sex_metadata` | false means **no** phecode is sex-restricted and every sex-specific phenotype is scored against the whole cohort |
+| `analysis_timezone` | pinned to UTC. Two sites must resolve a timestamp to the same calendar date or `--case-rule two-dates` gives them different case sets |
+
+## Quality control
+
+At minimum, check:
+
+1. the release checksum and mapper version in `audit.json`;
+2. cohort/event row counts and vocabulary counts from preflight;
+3. unmapped rates separately for each vocabulary;
+4. high-frequency codes in `unmapped_events.csv`, which indicate either a stale
+   map or a vocabulary the release does not cover;
+5. retained phenotype counts and sex-specific phenotype handling;
+6. that excluded categories are absent from the retained phenotype list.
+
+Once, on your first real run, also check the phenotypes themselves rather than the
+plumbing:
+
+```bash
+.venv/bin/python scripts/check_prevalence.py \
+  --run phecodex_run --release release --cohort cohort.csv --out prevalence.csv
+```
+
+Everything above is internal consistency — it cannot tell you whether hypertension
+came out at 25% or at 2.5%. This compares common phecodes against wide
+order-of-magnitude bands and confirms that sex-restricted phecodes score **exactly
+zero** people of the wrong sex, which is the sharpest check available because the
+expected answer is exact rather than a range. It prints aggregate counts only.
+
+For aggregate cross-biobank plausibility checks, export only aggregate
+PhecodeX counts from an authorized source such as the All by All public
+summary. The validator accepts CSV or Parquet with:
+
+```text
+phecode,description,sex,ancestry,case_count,control_count,sample_count,source,source_version
+```
+
+Run it with:
+
+```bash
+.venv/bin/phecodex-map validate-phecodex \
+  --run phecodex_run \
+  --release release \
+  --external all_by_all_phecodex_summary.csv \
+  --output validation_all_by_all
+```
+
+This is a plausibility comparison, not an exact expected-count test. The
+report flags denominator, ancestry, sex-stratum, version, and missing-trait
+differences for manual review. Never export participant-level records from
+an external resource for this comparison.
+
+## Privacy and data governance
+
+Do not commit or redistribute cohort/event files, phenotype matrices,
+person-level case files, generated runs, participant-level reports, Athena or
+UMLS/SNOMED source files, raw download archives, or credentials.
+
+The shared analyst distribution is intended to contain the mapper, an ICD-only
+release, its manifest/checksum, documentation, and synthetic fixtures. Keep
+licensed vocabulary sources at the site that built the release. The repository
+is configured to ignore local releases, Athena files, and generated outputs.
+
+## Licence
+
+The code in this repository is released under the [MIT licence](LICENSE) — use,
+modify and redistribute it freely; the only condition is that the copyright notice
+travels with it.
+
+That licence covers **this tool**, not the data it maps. Two separate things ride
+along with a built release, and neither is ours to relicense:
+
+- **PhecodeX.** The mapping definitions come from the upstream
+  [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary),
+  which states no licence of its own. Use follows academic norms and the citation
+  below rather than an explicit grant. A release directory contains PhecodeX-derived
+  content, so redistributing one is not covered by the MIT licence above.
+- **OMOP/Athena.** Releases built with `--athena-dir` may embed Athena-derived
+  knowledge, which is separately licensed and must not be redistributed. Build shared
+  releases with `--icd-only`, and check
+  `recovery.assignments_resting_solely_on_athena_evidence` in the manifest.
+
+If you are redistributing a release rather than the code, take those two points to
+your data-access team first.
+
+## Provenance and citation
+
+This tool does not define phenotypes. It applies the published PhecodeX mapping, and
+any analysis using it should cite the source:
+
+> Shuey MM, Stead WW, Aka I, et al. Next-generation phenotyping: introducing
+> phecodeX for enhanced discovery research in medical phenomics.
+> *Bioinformatics*. 2023;39(11):btad655. doi:10.1093/bioinformatics/btad655
+> (PMID 37930895)
+
+**Which PhecodeX version you are actually using.** A release covering both
+vocabularies is a hybrid, and this is not a choice the tool makes. Upstream ships **no
+WHO map for version 1.1** — the 1.1 directory contains ICD-10-CM only, and the
+repository README says *"We are still working on a WHO-compatible version for phecodeX
+1.1. For now, please use the 1.0 files"*. So a two-vocabulary build takes:
+
+| vocabulary | upstream version |
+|---|---|
+| `ICD10CM` | PhecodeX **1.1** |
+| `ICD10` (WHO) | PhecodeX **1.0** |
+
+**A cohort coded in WHO ICD-10 is therefore phenotyped entirely from 1.0**, without the
+~850 ICD-10 codes and the mapping corrections 1.1 introduced. UK Biobank is such a
+cohort. Do not describe such a run as "PhecodeX 1.1" in a methods section.
+
+`manifest.json` records this per source file rather than leaving it to be asserted:
+each entry under `phecodex_map` carries an `upstream` block naming the published file
+and version its checksum matches, and `phecodex_upstream_versions` lists the versions in
+play. A file the tool does not recognise is recorded as `null` rather than guessed at.
+
+Source maps come from the [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary);
+`manifest.json` records the path and sha256 of every input file used, so a result
+can be traced back to the exact map that produced it. Where this tool departs from
+the published map — the opt-in recovery of omitted codes, and the one adjudicated
+limb-pain verdict — it is recorded in `recovered_codes.csv` and the manifest rather
+than folded in silently.
+
+Releases built with `--athena-dir` use an OMOP/Athena vocabulary extract. Athena
+content is separately licensed and **must not be redistributed**; `--icd-only` exists
+so a shared release carries none of its tables. See the note above on
+`assignments_resting_solely_on_athena_evidence` before sharing a recovered map.
+
+Cross-checks against [PheTK](https://github.com/nhgritctran/PheTK) use the adapter in
+`phetk_custom_map_icd10.csv` and `phetk_custom_map_icd10cm.csv` — one per ICD-10
+flavour, because PheTK's custom format identifies a vocabulary only as 9 or 10 and so
+cannot tell WHO ICD-10 from ICD-10-CM. Use the file matching your events' `vocabulary`
+label; a combined file makes PheTK resolve a WHO event against ICD-10-CM-only rows.
+
+## What the map contains
+
+Background on how the shipped map was produced and where it departs from the
+published PhecodeX files. Useful when interpreting results or writing a methods
+section; not needed to run anything.
+
+## Mapping policy
+
+An event maps to a phecode only when its normalized code appears in the release's
+PhecodeX map for that vocabulary. There is no inference from parent codes, no
+string-prefix matching, and no cross-vocabulary fallback.
 
 ### Recovering codes the published map omits
 
@@ -335,121 +464,10 @@ This was found by comparing unmapped WHO ICD-10 codes against their SNOMED-bridg
 phecodes and adjudicating the disagreements; the same review confirmed the other
 nineteen disagreements were cases where the CM map correctly adds specificity.
 
-## Quality control
+## For maintainers
 
-At minimum, check:
-
-1. the release checksum and mapper version in `audit.json`;
-2. cohort/event row counts and vocabulary counts from preflight;
-3. unmapped rates separately for each vocabulary;
-4. high-frequency codes in `unmapped_events.csv`, which indicate either a stale
-   map or a vocabulary the release does not cover;
-5. retained phenotype counts and sex-specific phenotype handling;
-6. that excluded categories are absent from the retained phenotype list.
-
-For aggregate cross-biobank plausibility checks, export only aggregate
-PhecodeX counts from an authorized source such as the All by All public
-summary. The validator accepts CSV or Parquet with:
-
-```text
-phecode,description,sex,ancestry,case_count,control_count,sample_count,source,source_version
-```
-
-Run it with:
-
-```bash
-.venv/bin/phecodex-map validate-phecodex \
-  --run phecodex_run \
-  --release releases/phecodex-1.1 \
-  --external all_by_all_phecodex_summary.csv \
-  --output validation_all_by_all
-```
-
-This is a plausibility comparison, not an exact expected-count test. The
-report flags denominator, ancestry, sex-stratum, version, and missing-trait
-differences for manual review. Never export participant-level records from
-an external resource for this comparison.
-
-## Privacy and data governance
-
-Do not commit or redistribute cohort/event files, phenotype matrices,
-person-level case files, generated runs, participant-level reports, Athena or
-UMLS/SNOMED source files, raw download archives, or credentials.
-
-The shared analyst distribution is intended to contain the mapper, an ICD-only
-release, its manifest/checksum, documentation, and synthetic fixtures. Keep
-licensed vocabulary sources at the site that built the release. The repository
-is configured to ignore local releases, Athena files, and generated outputs.
-
-## Licence
-
-The code in this repository is released under the [MIT licence](LICENSE) — use,
-modify and redistribute it freely; the only condition is that the copyright notice
-travels with it.
-
-That licence covers **this tool**, not the data it maps. Two separate things ride
-along with a built release, and neither is ours to relicense:
-
-- **PhecodeX.** The mapping definitions come from the upstream
-  [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary),
-  which states no licence of its own. Use follows academic norms and the citation
-  below rather than an explicit grant. A release directory contains PhecodeX-derived
-  content, so redistributing one is not covered by the MIT licence above.
-- **OMOP/Athena.** Releases built with `--athena-dir` may embed Athena-derived
-  knowledge, which is separately licensed and must not be redistributed. Build shared
-  releases with `--icd-only`, and check
-  `recovery.assignments_resting_solely_on_athena_evidence` in the manifest.
-
-If you are redistributing a release rather than the code, take those two points to
-your data-access team first.
-
-## Provenance and citation
-
-This tool does not define phenotypes. It applies the published PhecodeX mapping, and
-any analysis using it should cite the source:
-
-> Shuey MM, Stead WW, Aka I, et al. Next-generation phenotyping: introducing
-> phecodeX for enhanced discovery research in medical phenomics.
-> *Bioinformatics*. 2023;39(11):btad655. doi:10.1093/bioinformatics/btad655
-> (PMID 37930895)
-
-**Which PhecodeX version you are actually using.** A release covering both
-vocabularies is a hybrid, and this is not a choice the tool makes. Upstream ships **no
-WHO map for version 1.1** — the 1.1 directory contains ICD-10-CM only, and the
-repository README says *"We are still working on a WHO-compatible version for phecodeX
-1.1. For now, please use the 1.0 files"*. So a two-vocabulary build takes:
-
-| vocabulary | upstream version |
-|---|---|
-| `ICD10CM` | PhecodeX **1.1** |
-| `ICD10` (WHO) | PhecodeX **1.0** |
-
-**A cohort coded in WHO ICD-10 is therefore phenotyped entirely from 1.0**, without the
-~850 ICD-10 codes and the mapping corrections 1.1 introduced. UK Biobank is such a
-cohort. Do not describe such a run as "PhecodeX 1.1" in a methods section.
-
-`manifest.json` records this per source file rather than leaving it to be asserted:
-each entry under `phecodex_map` carries an `upstream` block naming the published file
-and version its checksum matches, and `phecodex_upstream_versions` lists the versions in
-play. A file the tool does not recognise is recorded as `null` rather than guessed at.
-
-Source maps come from the [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary);
-`manifest.json` records the path and sha256 of every input file used, so a result
-can be traced back to the exact map that produced it. Where this tool departs from
-the published map — the opt-in recovery of omitted codes, and the one adjudicated
-limb-pain verdict — it is recorded in `recovered_codes.csv` and the manifest rather
-than folded in silently.
-
-Releases built with `--athena-dir` use an OMOP/Athena vocabulary extract. Athena
-content is separately licensed and **must not be redistributed**; `--icd-only` exists
-so a shared release carries none of its tables. See the note above on
-`assignments_resting_solely_on_athena_evidence` before sharing a recovered map.
-
-Cross-checks against [PheTK](https://github.com/nhgritctran/PheTK) use the adapter in
-`phetk_custom_map_icd10.csv` and `phetk_custom_map_icd10cm.csv` — one per ICD-10
-flavour, because PheTK's custom format identifies a vocabulary only as 9 or 10 and so
-cannot tell WHO ICD-10 from ICD-10-CM. Use the file matching your events' `vocabulary`
-label; a combined file makes PheTK resolve a WHO event against ICD-10-CM-only rows.
+Building a release from official PhecodeX files, and packaging one for other
+sites. Analysts do not need any of this.
 
 ## Advanced release building
 
