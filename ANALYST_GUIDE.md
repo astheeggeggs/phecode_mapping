@@ -157,16 +157,23 @@ deciding whether a planned subset is large enough to be worth running.
 ```bash
 .venv/bin/python scripts/plot_phecode_attrition.py \
   --cohort cohort.csv \
+  --release release \
   --person-phecodes phecodex_run/person_phecodes.parquet \
   --output-csv attrition.csv --output-svg attrition.svg \
-  --sample-sizes 1000,5000,10000,50000,100000
+  --sample-sizes 1000,5000,10000,50000,100000,250000,500000
 ```
 
-It repeatedly downsamples the cohort and reapplies both thresholds. It is an aggregate
-QC tool and deliberately approximate: it uses the any-event case table and does **not**
-reproduce control exclusions or sex-specific denominators, so treat its counts as an
-upper bound rather than a prediction of a real run. Those limitations are recorded in
-the output metadata. The CSV and SVG are aggregate and safe to share where your data
+**Pass `--release`.** Without it every phecode is scored against the whole sample, and
+the ~325 sex-restricted phecodes get a denominator twice their real one — so the curve
+promises phenotypes a real run will not retain. With it, the curve reproduces the
+mapper's own retained count exactly at full cohort size, which is the check worth
+running first: compare the last row against `phenotype_matrix.n_columns` in your
+`audit.json`.
+
+One approximation remains: it uses the any-event case table and does not reproduce
+control exclusions, so with `--control-exclusions` in play the counts are a slight
+upper bound. `sex_aware` in the output CSV records whether sex restrictions were
+applied. The CSV and SVG are aggregate and safe to share where your data
 agreement permits; the inputs are not.
 
 ## Confirming a fixture leaks nothing

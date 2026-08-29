@@ -494,3 +494,79 @@ def test_every_phecode_named_by_the_prevalence_check_exists_and_is_restricted() 
         assert phecode in known, f"{phecode} is not a phecode, so its sex check never runs"
         assert known[phecode] == expected_sex, \
             f"{phecode} is restricted to {known[phecode]}, not {expected_sex}"
+
+
+def _attrition_fixture(tmp_path: Path, *, female_cases: int):
+    """A Female-only phecode where the sex-aware and sex-blind answers can differ."""
+    from conftest import write_csv
+    from phecodex_mapper.mapper import map_phecodes
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    write_csv(tmp_path / "m.csv", ["phecode", "ICD", "vocabulary_id"],
+              [["FE_001", "B01.1", "ICD10CM"]])
+    write_csv(tmp_path / "i.csv", ["phecode", "sex", "phecode_string", "category"],
+              [["FE_001", "Female", "F1", "X"]])
+    release = tmp_path / "rel"
+    build_vocabulary(tmp_path / "m.csv", tmp_path / "i.csv", release, None)
+
+    people = ([[f"f{i:05d}", "Female"] for i in range(2000)]
+              + [[f"m{i:05d}", "Male"] for i in range(2000)])
+    write_csv(tmp_path / "c.csv", ["person_id", "sex"], people)
+    write_csv(tmp_path / "e.csv", ["person_id", "code", "vocabulary"],
+              [[f"f{i:05d}", "B01.1", "ICD10CM"] for i in range(female_cases)])
+    run = tmp_path / "run"
+    map_phecodes(release, tmp_path / "c.csv", tmp_path / "e.csv", run,
+                 min_cases=100, min_controls=100)
+    return release, tmp_path / "c.csv", run
+
+
+def _attrition(tmp_path: Path, cohort: Path, run: Path, name: str, release: Path | None):
+    out_csv = tmp_path / f"{name}.csv"
+    cmd = [sys.executable, str(ROOT / "scripts/plot_phecode_attrition.py"),
+           "--cohort", str(cohort), "--person-phecodes", str(run / "person_phecodes.parquet"),
+           "--output-csv", str(out_csv), "--output-svg", str(tmp_path / f"{name}.svg"),
+           "--sample-sizes", "4000", "--min-cases", "100", "--min-controls", "100"]
+    if release:
+        cmd += ["--release", str(release)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return int(out_csv.read_text().strip().splitlines()[1].split(",")[1])
+
+
+def test_the_attrition_curve_reproduces_a_real_run_at_full_cohort_size(tmp_path: Path) -> None:
+    """If the curve disagrees with the mapper at n = the whole cohort, it is wrong
+    everywhere else too. 1,950 of 2,000 females are cases, so female controls are 50 --
+    below the threshold -- and a real run drops the phecode."""
+    import json
+    release, cohort, run = _attrition_fixture(tmp_path, female_cases=1950)
+    actual = json.loads((run / "audit.json").read_text())["phenotype_matrix"]["n_columns"]
+    assert actual == 0
+    assert _attrition(tmp_path, cohort, run, "aware", release) == actual
+
+
+def test_ignoring_sex_restrictions_overstates_how_many_phecodes_survive(tmp_path: Path) -> None:
+    """The reason --release matters for a published curve.
+
+    Scored against the whole sample the phecode has 2,050 controls and looks retainable;
+    scored against females, which is what a real run does, it has 50 and is dropped.
+    Without --release the curve therefore promises analysts phenotypes they will not get.
+    """
+    release, cohort, run = _attrition_fixture(tmp_path, female_cases=1950)
+    assert _attrition(tmp_path, cohort, run, "blind", None) == 1
+    assert _attrition(tmp_path, cohort, run, "aware2", release) == 0
+
+
+def test_a_cohort_without_sex_is_refused_when_the_release_restricts_phecodes(tmp_path: Path) -> None:
+    """Silently falling back to sex-blind counting would publish the overstated curve."""
+    from conftest import write_csv
+    release, _, run = _attrition_fixture(tmp_path, female_cases=500)
+    nosex = tmp_path / "nosex.csv"
+    write_csv(nosex, ["person_id"], [[f"f{i:05d}"] for i in range(2000)])
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/plot_phecode_attrition.py"),
+         "--cohort", str(nosex), "--release", str(release),
+         "--person-phecodes", str(run / "person_phecodes.parquet"),
+         "--output-csv", str(tmp_path / "x.csv"), "--output-svg", str(tmp_path / "x.svg"),
+         "--sample-sizes", "1000"], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "overstate retention" in result.stderr

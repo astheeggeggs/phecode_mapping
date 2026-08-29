@@ -45,7 +45,13 @@ def write_svg(path: Path, rows: list[dict], min_cases: int, min_controls: int) -
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cohort", type=Path, required=True, help="Mapper cohort CSV/Parquet with person_id.")
+    parser.add_argument("--cohort", type=Path, required=True,
+                         help="Mapper cohort CSV/Parquet with person_id and sex.")
+    parser.add_argument("--release", type=Path, default=None,
+                         help="Release directory. Supplying it makes sex-restricted phecodes "
+                              "score against the matching sex only, as a real run does. Without "
+                              "it every phecode is treated as unrestricted, which OVERSTATES "
+                              "retention for the ~325 restricted phecodes.")
     parser.add_argument("--person-phecodes", type=Path, required=True, help="Mapper person_phecodes.parquet.")
     parser.add_argument("--output-csv", type=Path, required=True)
     parser.add_argument("--output-svg", type=Path, required=True)
@@ -55,8 +61,38 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
     con = duckdb.connect()
-    cohort = con.execute(f"SELECT DISTINCT CAST(person_id AS VARCHAR) FROM read_csv_auto('{args.cohort}')" if args.cohort.suffix.lower() != ".parquet" else f"SELECT DISTINCT CAST(person_id AS VARCHAR) FROM read_parquet('{args.cohort}')").fetchall()
-    people = [r[0] for r in cohort]
+    reader = "read_parquet" if args.cohort.suffix.lower() == ".parquet" else "read_csv_auto"
+    cohort_columns = {r[0] for r in con.execute(
+        f"DESCRIBE SELECT * FROM {reader}('{args.cohort}')").fetchall()}
+    has_sex = "sex" in cohort_columns
+    sex_expression = "upper(trim(CAST(sex AS VARCHAR)))" if has_sex else "''"
+    rows_in = con.execute(
+        f"SELECT DISTINCT CAST(person_id AS VARCHAR), {sex_expression} "
+        f"FROM {reader}('{args.cohort}')").fetchall()
+    people = [r[0] for r in rows_in]
+    sex_of = {r[0]: r[1] for r in rows_in}
+
+    # Which phecodes are sex-restricted, from the release rather than assumed. A
+    # restricted phecode is evaluable only in the matching sex, so both its case count
+    # and its control denominator come from that half of the sample -- treating the
+    # whole sample as the denominator lets it clear --min-controls at a sample size
+    # where a real run would drop it.
+    restrict: dict[str, str] = {}
+    if args.release:
+        info = args.release / "phecode_info.parquet"
+        if info.is_file():
+            columns = {r[0] for r in con.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{info}')").fetchall()}
+            if {"phecode", "sex"} <= columns:
+                restrict = {r[0]: r[1] for r in con.execute(
+                    f"SELECT phecode, upper(trim(sex)) FROM read_parquet('{info}') "
+                    f"WHERE upper(trim(sex)) IN ('MALE','FEMALE')").fetchall()}
+    if restrict and not has_sex:
+        raise SystemExit("--release names sex-restricted phecodes but --cohort has no sex "
+                         "column; the curve would overstate retention. Supply a cohort with sex.")
+    if args.release and not restrict:
+        print("note: the release restricts no phecode by sex, so every phecode is scored "
+              "against the whole sample")
     cases = con.execute(f"SELECT CAST(person_id AS VARCHAR), phecode FROM read_parquet('{args.person_phecodes}')").fetchall()
     by_phecode: dict[str, set] = defaultdict(set)
     for person_id, phecode in cases:
@@ -75,8 +111,17 @@ def main() -> None:
         n = requested
         if n <= 0: continue
         selected = set(shuffled[:n])
-        retained = sum(1 for case_people in by_phecode.values() if (cases_n := len(case_people & selected)) >= args.min_cases and n - cases_n >= args.min_controls)
-        rows.append({"sample_size": n, "retained_phecodes": retained, "min_cases": args.min_cases, "min_controls": args.min_controls, "seed": args.seed})
+        n_male = sum(1 for p in selected if sex_of.get(p) == "MALE")
+        n_female = sum(1 for p in selected if sex_of.get(p) == "FEMALE")
+        retained = 0
+        for phecode, case_people in by_phecode.items():
+            cases_n = len(case_people & selected)
+            evaluable = {"MALE": n_male, "FEMALE": n_female}.get(restrict.get(phecode), n)
+            if cases_n >= args.min_cases and evaluable - cases_n >= args.min_controls:
+                retained += 1
+        rows.append({"sample_size": n, "retained_phecodes": retained,
+                     "min_cases": args.min_cases, "min_controls": args.min_controls,
+                     "sex_aware": bool(restrict), "seed": args.seed})
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     with args.output_csv.open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]) if rows else ["sample_size", "retained_phecodes", "min_cases", "min_controls", "seed"])
