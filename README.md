@@ -16,12 +16,12 @@ Everything below "What the map contains" is background you do not need to start.
 **If you are building or distributing a release**, go to
 [For maintainers](#for-maintainers).
 
-Two things catch people out, both in the input contract, and neither fails loudly:
+Two things catch people out:
 
 | | |
 |---|---|
-| **State which ICD-10 you have.** `ICD10` (WHO) and `ICD10CM` are different vocabularies. UK Biobank is `ICD10`. | [detail](#you-must-state-which-icd-10-you-are-mapping) |
-| **A blank cell in an exclusions file voids the whole rule**, so blanks are refused rather than ignored. | [detail](#input-contract) |
+| **State which ICD-10 you have.** `ICD10` (WHO) and `ICD10CM` are different vocabularies. UK Biobank is `ICD10`. The wrong label does not fail — it quietly drops or misassigns events. | [detail](#you-must-state-which-icd-10-you-are-mapping) |
+| **Never leave a cell blank in an exclusions file.** A blank would void the whole rule, so a run refuses the file instead of accepting it. | [detail](#exclusion-files-must-not-have-blank-cells) |
 
 ## Install
 
@@ -158,9 +158,19 @@ phenotype — `J33.x` (nasal polyp) takes only RE_471.5 under CM but also CA_135
 label. Measured on a 2.6M-event UK Biobank extract, mislabelling it `ICD10CM` moved
 168,769 events between mapped and unmapped.
 
-Two things make a mismatch visible rather than silent. `map-phecodes` reports the
-unmapped rate per vocabulary in `audit.json` and warns on stderr when a vocabulary
-with at least 1,000 events exceeds 20% unmapped. And `manifest.json` records, under
+Two things make a mismatch visible rather than silent, and neither of them is the
+unmapped rate on its own.
+
+**The rate alone cannot tell a mislabel from an honest gap.** `run` records an unmapped
+rate per vocabulary in `audit.json`, but PhecodeX's WHO map is genuinely coarse, so a
+*correctly* labelled UK Biobank extract already sits near 20% unmapped. Judging by that
+number would condemn a correct run. The field that does discriminate is
+`share_of_unmapped_rescued_by_sibling`: of the events that failed to map, the fraction
+that *would* have mapped under the other ICD-10 label. Correctly labelled data sits
+near 1%, mislabelled data near 20%, and a run warns on stderr when a vocabulary with at
+least 1,000 events crosses 5%. Do not relabel your events on the unmapped rate alone.
+
+**Check the release expects the label you are sending it.** `manifest.json` records, under
 `vocabularies`, which source file each label came from — worth checking, because
 PhecodeX ships the WHO map twice: `phecodeX_unrolled_ICD_WHO.csv` labels it `ICD10`
 while `phecodeX_unrolled_ICD_UKB.csv` labels byte-identical content `ICD10CM`. A
@@ -181,6 +191,29 @@ Where the published map genuinely lags the current ICD release, the remedy is a
 curated, versioned supplement to the map — explicit and auditable — rather than
 run-time inference. Codes with no entry are reported in `unmapped_events.csv`;
 review that file rather than assuming a low unmapped rate means good coverage.
+
+### Exclusion files must not have blank cells
+
+`--control-exclusions` and `--exclude-phenotypes` each take a CSV of rules. Every cell
+a rule is matched on has to be filled in. If any is blank the run stops before mapping
+and names the column and how many rows are affected.
+
+That is stricter than it looks, and deliberately so: a blank does not break its own
+rule quietly, it breaks every rule. SQL treats a comparison against an empty value as
+neither true nor false, so a single blank cell makes "is this phecode excluded?"
+undecidable for *every* phecode and drops all of them from every output. The run would
+otherwise report success and hand back an empty matrix. Refusing the file is the last
+point at which the problem is still visible.
+
+A rule that is filled in but matches nothing is a different case. That is legitimate —
+a shared policy need not name only what your release happens to contain — so it is
+reported rather than refused, on stderr and in `audit.json` under
+`control_exclusions.unmatched_rules`, `exclude_phenotypes.unmatched_category_rules`
+and `exclude_phenotypes.unmatched_phecode_rules`. Check those after every run: a rule
+that removes nobody leaves the people it was meant to exclude in the control pool,
+which inflates every control denominator. Phecode identifiers are matched
+case-sensitively, so `gu_001` will not match `GU_001`; `--exclude-phenotypes` category
+names are matched case-insensitively, so `symptoms` does match `Symptoms`.
 
 ## Outputs
 
