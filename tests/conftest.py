@@ -45,8 +45,14 @@ def full_release(tmp_path: Path) -> Path:
         ["SS_004", "A02.0", "ICD10CM"],
     ])
     info = tmp_path / "info_full.csv"
-    # 'Symptoms' is spelled to match src/phecodex_mapper/data/recommended_exclusions.csv
-    # exactly -- the bundled default is matched case- and whitespace-sensitively.
+    # 'Symptoms' matches src/phecodex_mapper/data/recommended_exclusions.csv. Category
+    # rules are in fact matched case-insensitively (both sides go through upper() in
+    # _load_excluded_phecodes), so the exact spelling is not what makes this work --
+    # measured: 'symptoms' excludes SS_004 just as 'Symptoms' does. It is *phecode*
+    # rules that are case-sensitive: 'gu_001' matches nothing and is reported in
+    # unmatched_phecode_rules. Both are pinned -- see
+    # test_exclusion_matching.test_exclude_phenotypes_category_matches_regardless_of_case
+    # and test_misleading_output.py's unmatched_phecode_rules assertion.
     write_csv(info, ["phecode", "sex", "category", "phecode_string"], [
         ["GU_001", "Female", "Genitourinary", "Female-only trait"],
         ["GU_002", "Male", "Genitourinary", "Male-only trait"],

@@ -1,3 +1,13 @@
+# Complete pin for the analyst environment, resolved on python:3.11-slim -- the base
+# image both container definitions use. Regenerate with:
+#
+#   docker run --rm python:3.11-slim sh -c 'pip install -q duckdb openpyxl pyarrow && pip freeze'
+#
+# et_xmlfile and packaging are transitive (of openpyxl and pyarrow). They are pinned
+# here so that two sites installing months apart resolve the same set; previously they
+# floated, and only the three direct dependencies were fixed.
 duckdb==1.5.5
+et_xmlfile==2.0.0
 openpyxl==3.1.5
+packaging==26.3
 pyarrow==25.0.1

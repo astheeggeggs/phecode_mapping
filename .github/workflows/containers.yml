@@ -1,0 +1,76 @@
+name: containers
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+# The container definitions previously had no build coverage. The suite only grepped
+# the Dockerfile for script names, which is why containers/.dockerignore sat at a path
+# Docker never reads -- every exclusion in it silently inert, and a 2.4 GB build context
+# (licensed athena/ included) shipped to the daemon -- with nothing failing.
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the analyst image, exactly as ANALYST_GUIDE documents
+        # Cold build, so "transferring context" reports the whole context rather than a
+        # BuildKit incremental delta. A checkout carries no .venv or athena/, so this is
+        # a weaker signal here than locally -- it still fails if an exclusion is dropped
+        # and a large tracked directory starts being sent.
+        run: |
+          docker build -f containers/Dockerfile --progress=plain -t phecodex-mapper:ci . 2>&1 | tee build.log
+          size=$(grep -oE 'transferring context: [0-9.]+[kMG]?B' build.log | tail -1)
+          echo "context: ${size:-not reported}"
+          case "$size" in *GB*) echo "::error::build context reached gigabytes"; exit 1;; esac
+
+      - name: Entrypoint runs
+        run: docker run --rm phecodex-mapper:ci --help
+
+      - name: Default exclusions policy is inside the image
+        # .dockerignore's *.csv patterns match only the context root, which is what lets
+        # this packaged CSV through. Broadening them to **/*.csv would strip the default
+        # exclusion policy out of the image while the build still appeared to succeed.
+        run: |
+          docker run --rm --entrypoint python phecodex-mapper:ci -c \
+            "import importlib.resources as r, sys; \
+             p = r.files('phecodex_mapper') / 'data' / 'recommended_exclusions.csv'; \
+             sys.exit('recommended_exclusions.csv missing from image') if not p.is_file() else None; \
+             print(p.read_text().strip().splitlines()[0])"
+
+      - name: Installed packages match requirements-lock.txt exactly
+        # The lock is a complete pin, not just the three direct dependencies. If a
+        # transitive package starts floating again this is where it shows up.
+        run: |
+          docker run --rm --entrypoint pip phecodex-mapper:ci freeze \
+            | grep -viE '^phecodex-mapper' | sort > installed.txt
+          grep -vE '^\s*(#|$)' requirements-lock.txt | sort > expected.txt
+          diff -u expected.txt installed.txt
+
+      - name: No licensed or participant-level directory in the image
+        run: |
+          docker run --rm --entrypoint sh phecodex-mapper:ci -c '
+            for d in athena scratchpad_ukb releases runs reports distributions hierarchy_sources; do
+              if [ -e "/opt/phecodex/$d" ]; then echo "LEAK: $d is in the image"; exit 1; fi
+            done
+            echo "no licensed or generated directory present"'
+
+      - name: Bundled examples run end to end
+        # The guide calls examples/ a two-person smoke test, so the image has to carry it.
+        # Two people cannot clear --min-cases 200, so a successful run reports zero
+        # retained phenotypes; that is the documented expected result, not a failure.
+        run: |
+          docker run --rm --entrypoint sh phecodex-mapper:ci -c '
+            set -e
+            printf "phecode,ICD,vocabulary_id\nAA_1,A01.1,ICD10\nBB_2,123.4,ICD9CM\n" > /tmp/map.csv
+            printf "phecode,sex,category,phecode_string\nAA_1,Both,Infectious,Example A\nBB_2,Both,Circulatory,Example B\n" > /tmp/info.csv
+            phecodex-map build-vocabulary --phecodex-map /tmp/map.csv --phecodex-info /tmp/info.csv --output /tmp/release
+            phecodex-map run --release /tmp/release \
+              --cohort examples/cohort.csv --events examples/events.csv --output /tmp/run
+            python -c "import json; a = json.load(open(\"/tmp/run/audit.json\")); \
+              print(\"events:\", a[\"events\"], \"matrix columns:\", a[\"phenotype_matrix\"][\"n_columns\"]); \
+              assert a[\"events\"] == 2, a[\"events\"]"'

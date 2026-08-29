@@ -7,6 +7,7 @@ From: python:3.11-slim
     README.md /opt/phecodex/README.md
     ANALYST_GUIDE.md /opt/phecodex/ANALYST_GUIDE.md
     src /opt/phecodex/src
+    examples /opt/phecodex/examples
     scripts/verify_release.py /opt/phecodex/scripts/verify_release.py
     scripts/prepare_ukb_for_mapping.R /opt/phecodex/scripts/prepare_ukb_for_mapping.R
     scripts/plot_phecode_attrition.py /opt/phecodex/scripts/plot_phecode_attrition.py
