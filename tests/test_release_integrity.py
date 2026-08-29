@@ -232,3 +232,32 @@ def test_the_mapper_refuses_a_release_carrying_an_unrecorded_snomed_map(
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "A01.1", "ICD10CM"]])
     with pytest.raises(ValueError, match="not recorded in manifest.json"):
         map_phecodes(full_release, cohort, events, tmp_path / "out", min_cases=1, min_controls=1)
+
+
+def test_the_manifest_names_the_upstream_phecodex_version_of_each_source(tmp_path: Path) -> None:
+    """A checksum pins the file exactly but tells a reader nothing they can cite.
+
+    It matters because a "PhecodeX 1.1" release covering both vocabularies is
+    necessarily a hybrid: upstream ships no WHO map for 1.1, so CM comes from 1.1 and
+    WHO from 1.0. Any cohort coded in WHO ICD-10 -- UK Biobank included -- is therefore
+    phenotyped from 1.0. Digests below are the real published files.
+    """
+    from conftest import write_csv
+    from phecodex_mapper.vocabulary import UPSTREAM_PHECODEX_FILES, _upstream, build_vocabulary
+
+    who_10 = "50b06ef08d41a51a9b691cc2e60b2a63d4f54b8262e7688594f885c75f410796"
+    cm_11 = "31705ab956267abee83bc363a5c8a0f7c1489daad8cc6f347facb1443dc6ffd5"
+    assert _upstream(who_10) == {"version": "1.0", "file": "phecodeX_unrolled_ICD_WHO.csv"}
+    assert _upstream(cm_11) == {"version": "1.1", "file": "phecodeX_unrolled_ICD_CM.csv"}
+    assert not any(e["version"] == "1.1" and "WHO" in e["file"]
+                   for e in UPSTREAM_PHECODEX_FILES.values()), \
+        "upstream publishes no WHO map for 1.1; recording one would be a fabrication"
+
+    # An unrecognised file is reported as such rather than guessed at.
+    source = tmp_path / "local.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["CV_003", "A01.1", "ICD10CM"]])
+    release = tmp_path / "rel"
+    build_vocabulary(source, None, release, None)
+    manifest = json.loads((release / "manifest.json").read_text())
+    assert manifest["phecodex_map"]["upstream"] is None
+    assert manifest["phecodex_upstream_versions"] == []

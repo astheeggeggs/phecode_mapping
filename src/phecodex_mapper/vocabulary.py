@@ -14,6 +14,45 @@ from .io import checksum, connect, pin_workbook_timestamps, quote, relation_for,
 
 REQUIRED_MAP_COLUMNS = {"phecode", "ICD", "vocabulary_id"}
 
+# Upstream PhecodeX source files, keyed by content digest. A release built from these
+# is otherwise unable to say WHICH published version produced it: the manifest records
+# a checksum, which pins the file exactly but tells a reader nothing they can put in a
+# methods section.
+#
+# It matters here because a "PhecodeX 1.1" release is necessarily a hybrid. Upstream has
+# not released a WHO map for 1.1 -- version 1.1 ships CM only, and the repository README
+# says "We are still working on a WHO-compatible version for phecodeX 1.1. For now,
+# please use the 1.0 files". So a build covering both vocabularies takes CM from 1.1 and
+# WHO from 1.0, and any cohort coded in WHO ICD-10 (UK Biobank among them) is phenotyped
+# entirely from 1.0 -- without the ~850 ICD-10 codes and the mapping corrections 1.1
+# added. Naming the release 1.1 states that incorrectly.
+#
+# Digests verified against github.com/PheWAS/PhecodeXVocabulary. An unrecognised file is
+# recorded as version null rather than guessed at.
+UPSTREAM_PHECODEX_FILES = {
+    "01501c23787b4f201022570a31e3aaaa2d1d6f3a27dfbf1876af51be34e4b1d9":
+        {"version": "1.0", "file": "phecodeX_unrolled_ICD_CM.csv"},
+    "31705ab956267abee83bc363a5c8a0f7c1489daad8cc6f347facb1443dc6ffd5":
+        {"version": "1.1", "file": "phecodeX_unrolled_ICD_CM.csv"},
+    "50b06ef08d41a51a9b691cc2e60b2a63d4f54b8262e7688594f885c75f410796":
+        {"version": "1.0", "file": "phecodeX_unrolled_ICD_WHO.csv"},
+    "e9c21325b89645190f851412eff5ace961e9b73db85da2e2cdc27272232432f6":
+        {"version": "1.0", "file": "phecodeX_info.csv"},
+    "70198d06b2e87ae0204336de5eca54deced2630308231614e1820e72d82103c3":
+        {"version": "1.1", "file": "phecodeX_info.csv"},
+}
+
+
+def _upstream(digest: str) -> dict | None:
+    """Which published PhecodeX file this digest is, if it is one we recognise."""
+    return UPSTREAM_PHECODEX_FILES.get(digest)
+
+
+def _source_entry(path: Path) -> dict:
+    """Manifest record for one source file: where it came from, and what it is."""
+    digest = checksum(path)
+    return {"path": str(path), "sha256": digest, "upstream": _upstream(digest)}
+
 
 def _columns(con, source: str) -> set[str]:
     return {row[0] for row in con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()}
@@ -532,9 +571,17 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
     _write_xlsx(output / "phecodex_reference_maps.xlsx", sheets)
     manifest = {
         "tool_version": __version__, "created_at_utc": dt.datetime.now(dt.UTC).isoformat(),
-        "phecodex_map": ([{"path": str(path), "sha256": checksum(path)} for path in map_paths]
-                         if len(map_paths) > 1 else {"path": str(map_paths[0]), "sha256": checksum(map_paths[0])}),
-        "phecodex_info": None if not phecodex_info else {"path": str(phecodex_info), "sha256": checksum(phecodex_info)},
+        "phecodex_map": ([_source_entry(path) for path in map_paths]
+                         if len(map_paths) > 1 else _source_entry(map_paths[0])),
+        "phecodex_info": None if not phecodex_info else _source_entry(phecodex_info),
+        # The published PhecodeX versions actually in play, deduplicated. A release
+        # covering both vocabularies is normally {"1.1", "1.0"} -- CM from 1.1, WHO from
+        # 1.0 -- because upstream has not released a WHO map for 1.1. Calling such a
+        # release "1.1" overstates it, so the manifest states it instead.
+        "phecodex_upstream_versions": sorted({
+            entry["upstream"]["version"]
+            for entry in [_source_entry(path) for path in map_paths]
+            if entry["upstream"]}),
         "athena_dir": None if not athena_dir else str(athena_dir),
         "counts": {"icd_map_rows": len(icd_rows),
                    "snomed_map_rows": 0 if icd_only else len(snomed_rows)},

@@ -405,13 +405,33 @@ your data-access team first.
 
 ## Provenance and citation
 
-This tool does not define phenotypes. It applies the published **PhecodeX v1.1**
-mapping, and any analysis using it should cite the source:
+This tool does not define phenotypes. It applies the published PhecodeX mapping, and
+any analysis using it should cite the source:
 
 > Shuey MM, Stead WW, Aka I, et al. Next-generation phenotyping: introducing
 > phecodeX for enhanced discovery research in medical phenomics.
 > *Bioinformatics*. 2023;39(11):btad655. doi:10.1093/bioinformatics/btad655
 > (PMID 37930895)
+
+**Which PhecodeX version you are actually using.** A release covering both
+vocabularies is a hybrid, and this is not a choice the tool makes. Upstream ships **no
+WHO map for version 1.1** — the 1.1 directory contains ICD-10-CM only, and the
+repository README says *"We are still working on a WHO-compatible version for phecodeX
+1.1. For now, please use the 1.0 files"*. So a two-vocabulary build takes:
+
+| vocabulary | upstream version |
+|---|---|
+| `ICD10CM` | PhecodeX **1.1** |
+| `ICD10` (WHO) | PhecodeX **1.0** |
+
+**A cohort coded in WHO ICD-10 is therefore phenotyped entirely from 1.0**, without the
+~850 ICD-10 codes and the mapping corrections 1.1 introduced. UK Biobank is such a
+cohort. Do not describe such a run as "PhecodeX 1.1" in a methods section.
+
+`manifest.json` records this per source file rather than leaving it to be asserted:
+each entry under `phecodex_map` carries an `upstream` block naming the published file
+and version its checksum matches, and `phecodex_upstream_versions` lists the versions in
+play. A file the tool does not recognise is recorded as `null` rather than guessed at.
 
 Source maps come from the [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary);
 `manifest.json` records the path and sha256 of every input file used, so a result
@@ -441,6 +461,11 @@ phecodex-map build-vocabulary \
   --phecodex-info phecodeX_info_1.1_with_sex.csv \
   --output releases/phecodex-1.1
 ```
+
+Release directory names in these examples are arbitrary — `--output` takes whatever
+you give it. Do not read a version off the directory name; `manifest.json`'s
+`phecodex_upstream_versions` is the authoritative statement of which published PhecodeX
+files went in, and for a two-vocabulary build that is normally 1.1 and 1.0 together.
 
 To build the release you actually hand to analysts, add recovery and `--icd-only`:
 
