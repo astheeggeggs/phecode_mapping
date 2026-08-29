@@ -26,21 +26,38 @@ import duckdb
 # order-of-magnitude only: they are here to catch a mapping that is broken by a factor
 # of ten, not to validate epidemiology. Narrow them against your own published
 # estimates before treating a near-miss as a finding.
+# Identifiers verified against phecode_info, not recalled. Two of these were wrong on
+# the first pass -- CV_400 is rheumatic heart disease, not atrial fibrillation, and
+# GI_530 is disease of anus and rectum, not GORD -- and both duly flagged as "out of
+# band" on a run that was in fact correct. A check that cries wolf about itself is
+# worse than no check, so if you add a row here, confirm the string first:
+#   SELECT phecode, phecode_string FROM read_parquet('<release>/phecode_info.parquet')
+#
+# Bands in the last column are wide and order-of-magnitude: they exist to catch a
+# mapping broken by a factor of ten, not to validate epidemiology. The observed column
+# is what a full UK Biobank run (502,617 people, hospital-coded) actually produced.
 EXPECTED = {
-    "CV_401":     ("Hypertension",              0.10, 0.45),
-    "EM_202":     ("Type 2 diabetes",           0.02, 0.15),
-    "RE_475":     ("Asthma",                    0.03, 0.20),
-    "CV_404":     ("Ischemic heart disease",    0.02, 0.20),
-    "CV_400":     ("Atrial fibrillation",       0.01, 0.12),
-    "MS_708":     ("Osteoarthritis",            0.03, 0.30),
-    "GI_530":     ("GORD / oesophagitis",       0.02, 0.25),
-    "MB_286":     ("Mood disorders",            0.01, 0.15),
+    #  phecode        label                              lo    hi     observed in UKB
+    "CV_401":     ("Hypertension",                     0.10, 0.45),   # 19.4%
+    "EM_202":     ("Diabetes mellitus (all types)",    0.02, 0.15),   #  5.2%
+    "RE_475":     ("Asthma",                           0.03, 0.20),   #  6.5%
+    "CV_404":     ("Ischemic heart disease",           0.02, 0.20),   #  6.7%
+    "CV_416":     ("Cardiac arrhythmia",               0.01, 0.15),   #  5.2%
+    "CV_416.21":  ("Atrial fibrillation",              0.005, 0.10),
+    "MS_708":     ("Osteoarthritis",                   0.03, 0.30),   #  9.4%
+    "GI_511":     ("GORD / GERD",                      0.01, 0.25),   #  5.6%
+    "MB_286":     ("Mood [affective] disorders",       0.01, 0.15),   #  3.1%
+    "EM_239":     ("Hyperlipidemia",                   0.02, 0.30),   #  8.9%
+    "SO_371":     ("Cataract",                         0.01, 0.20),   #  5.1%
 }
 
 # Sex-restricted phecodes are the strongest check available, because the expected
 # answer is exactly zero rather than a band. If any of these has a single case in the
 # wrong sex, the sex restriction is not being applied to real data.
-SEX_CHECKS = {"GU_608": "Male", "CA_111": "Female", "PP_901": "Female"}
+# All three verified present and genuinely restricted in the 1.1 release. CA_111 was in
+# an earlier draft and is not a phecode at all, so it silently skipped -- a sex check
+# that never runs is exactly the vacuous guard this project keeps finding.
+SEX_CHECKS = {"GU_608": "Male", "GU_602": "Male", "PP_901": "Female", "CA_144": "Female"}
 
 
 def main() -> None:

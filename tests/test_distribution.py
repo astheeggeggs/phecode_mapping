@@ -461,3 +461,36 @@ def test_every_sample_size_above_the_cohort_leaves_a_readable_output(tmp_path: P
     assert result.returncode == 0, result.stdout + result.stderr
     assert out_csv.read_text().strip().splitlines()[1:] == [], "a skipped size produced a row"
     assert out_svg.is_file() and "No sample size" in out_svg.read_text()
+
+
+def test_every_phecode_named_by_the_prevalence_check_exists_and_is_restricted() -> None:
+    """A named phecode that does not exist skips silently and proves nothing.
+
+    Two identifiers were wrong on the first real run: CV_400 is rheumatic heart
+    disease rather than atrial fibrillation and GI_530 is disease of anus and rectum
+    rather than GORD, so both reported "out of band" on a run that was correct. A
+    third, CA_111, is not a phecode at all and its sex check never executed -- a
+    vacuous guard wearing the clothes of a real one.
+    """
+    import duckdb
+    import importlib.util
+
+    release = ROOT / "releases" / "phecodex-1.1-analyst"
+    if not (release / "phecode_info.parquet").is_file():
+        pytest.skip("no built release on this machine")
+
+    spec = importlib.util.spec_from_file_location("cp", ROOT / "scripts/check_prevalence.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    info = duckdb.sql(
+        f"SELECT phecode, sex FROM read_parquet('{release / 'phecode_info.parquet'}')").fetchall()
+    known = {row[0]: row[1] for row in info}
+
+    missing = sorted(p for p in module.EXPECTED if p not in known)
+    assert missing == [], f"named phecodes absent from the release: {missing}"
+
+    for phecode, expected_sex in module.SEX_CHECKS.items():
+        assert phecode in known, f"{phecode} is not a phecode, so its sex check never runs"
+        assert known[phecode] == expected_sex, \
+            f"{phecode} is restricted to {known[phecode]}, not {expected_sex}"
