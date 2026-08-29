@@ -163,6 +163,18 @@ deciding whether a planned subset is large enough to be worth running.
   --sample-sizes 1000,5000,10000,50000,100000,250000,500000
 ```
 
+Before trusting the curve, confirm its last point reproduces your run:
+
+```bash
+.venv/bin/python scripts/reconcile_attrition.py \
+  --run phecodex_run --release release --cohort cohort.csv
+```
+
+It compares three numbers that must agree — the run's own `retained` flag, the
+thresholds reapplied to the run's counts, and the curve's model — and if they do not,
+names the phecodes responsible. A curve that disagrees at full cohort size is wrong at
+every smaller size too.
+
 **Pass `--release`.** Without it every phecode is scored against the whole sample, and
 the ~325 sex-restricted phecodes get a denominator twice their real one — so the curve
 promises phenotypes a real run will not retain. With it, the curve reproduces the

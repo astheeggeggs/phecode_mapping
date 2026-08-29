@@ -570,3 +570,69 @@ def test_a_cohort_without_sex_is_refused_when_the_release_restricts_phecodes(tmp
          "--sample-sizes", "1000"], capture_output=True, text=True)
     assert result.returncode != 0
     assert "overstate retention" in result.stderr
+
+
+def test_the_reconciler_agrees_when_the_curve_is_faithful(tmp_path: Path) -> None:
+    """At full cohort size the curve must reproduce the run. If it does not, the curve
+    is wrong at every smaller sample size too."""
+    release, cohort, run = _attrition_fixture(tmp_path, female_cases=500)
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/reconcile_attrition.py"),
+         "--run", str(run), "--release", str(release), "--cohort", str(cohort),
+         "--min-cases", "100", "--min-controls", "100"], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "all three agree" in result.stdout
+
+
+def test_the_reconciler_names_the_phecodes_behind_a_discrepancy(tmp_path: Path) -> None:
+    """Positive control: a reconciler that cannot detect a mismatch is not one.
+
+    Mixing person_phecodes from a run WITHOUT phenotype exclusions against counts from
+    a run WITH them is the realistic way the two drift apart -- and it inflates the
+    curve, because the excluded phecodes still carry cases.
+    """
+    from conftest import write_csv
+    from phecodex_mapper.mapper import map_phecodes
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    write_csv(tmp_path / "m.csv", ["phecode", "ICD", "vocabulary_id"],
+              [[f"PH_{i:03d}", f"A{i:02d}.1", "ICD10CM"] for i in range(4)])
+    write_csv(tmp_path / "i.csv", ["phecode", "sex", "phecode_string", "category"],
+              [[f"PH_{i:03d}", "Both", f"P{i}", "Symptoms" if i < 2 else "Other"]
+               for i in range(4)])
+    release = tmp_path / "rel"
+    build_vocabulary(tmp_path / "m.csv", tmp_path / "i.csv", release, None)
+    people = [[f"p{i:05d}", "Female" if i % 2 else "Male"] for i in range(4000)]
+    cohort = tmp_path / "c.csv"
+    write_csv(cohort, ["person_id", "sex"], people)
+    # Varying rates so each phecode has BOTH cases and controls; giving everyone every
+    # code leaves zero controls, nothing is retained either way, and the comparison
+    # agrees trivially at 0 -- proving nothing.
+    import random as _random
+    rng = _random.Random(3)
+    write_csv(tmp_path / "e.csv", ["person_id", "code", "vocabulary"],
+              [[p[0], f"A{i:02d}.1", "ICD10CM"] for p in people
+               for i, rate in enumerate((0.30, 0.25, 0.20, 0.15)) if rng.random() < rate])
+    drop = tmp_path / "drop.csv"
+    write_csv(drop, ["match_type", "match_value"], [["category", "Symptoms"]])
+
+    map_phecodes(release, cohort, tmp_path / "e.csv", tmp_path / "with_excl",
+                 min_cases=100, min_controls=100, exclude_phenotypes=drop)
+    map_phecodes(release, cohort, tmp_path / "e.csv", tmp_path / "without_excl",
+                 min_cases=100, min_controls=100)
+
+    mixed = tmp_path / "mixed"
+    mixed.mkdir()
+    for name in ("audit.json", "phecode_counts.parquet"):
+        (mixed / name).write_bytes((tmp_path / "with_excl" / name).read_bytes())
+    (mixed / "person_phecodes.parquet").write_bytes(
+        (tmp_path / "without_excl" / "person_phecodes.parquet").read_bytes())
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/reconcile_attrition.py"),
+         "--run", str(mixed), "--release", str(release), "--cohort", str(cohort),
+         "--min-cases", "100", "--min-controls", "100"], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "all three agree" not in result.stdout
+    assert "the CURVE keeps but the RUN dropped" in result.stdout
+    assert "PH_000" in result.stdout
