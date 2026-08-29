@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Plot PhecodeX phenotype attrition after repeated cohort downsampling.
 
-This is an aggregate QC tool. It uses the mapper's any-event case table and
-reapplies both the case and control thresholds at every requested sample size.
-It does not reproduce control exclusions or sex-specific denominators; those
-limitations are recorded in the output metadata and README guidance.
+This is an aggregate QC tool. It reapplies the mapper's own retention rule -- the
+one in phecodex_mapper.retention, not a second copy of it -- at every requested
+sample size, against the mapper's case table and the release's sex restrictions.
+
+The one thing it cannot reproduce is the run's control REMOVALS: sub-threshold
+carriers under `--case-rule two-dates`, and non-cases named by
+`--control-exclusions`. Those are person-level facts that live only in the run,
+and person_phecodes.parquet does not carry them. So the curve is exact for a
+default `run` (any-event, no control exclusions) and an UPPER BOUND otherwise --
+see retention.controls_from_evaluable. reconcile_attrition.py measures the gap
+against a real run and attributes it exactly.
 """
 from __future__ import annotations
 
@@ -15,7 +22,9 @@ import random
 from collections import defaultdict
 from pathlib import Path
 
-import duckdb
+from phecodex_mapper.io import connect, relation_for
+from phecodex_mapper.retention import (
+    controls_from_evaluable, eligible_count, is_retained, load_phecode_restrictions)
 
 
 def _x_tick_values(xmin: int, xmax: int) -> list[int]:
@@ -97,15 +106,18 @@ def main() -> None:
     parser.add_argument("--min-controls", type=int, default=200)
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
-    con = duckdb.connect()
-    reader = "read_parquet" if args.cohort.suffix.lower() == ".parquet" else "read_csv_auto"
-    cohort_columns = {r[0] for r in con.execute(
-        f"DESCRIBE SELECT * FROM {reader}('{args.cohort}')").fetchall()}
+    # connect(), not duckdb.connect(): pins TimeZone=UTC and preserve_insertion_order,
+    # so this tool reads a run the same way the run was written. relation_for() accepts
+    # CSV and Parquet alike -- the hand-rolled suffix test it replaces silently accepted
+    # only what its own ternary happened to list.
+    con = connect()
+    cohort_src = relation_for(args.cohort)
+    cohort_columns = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {cohort_src}").fetchall()}
     has_sex = "sex" in cohort_columns
     sex_expression = "upper(trim(CAST(sex AS VARCHAR)))" if has_sex else "''"
     rows_in = con.execute(
         f"SELECT DISTINCT CAST(person_id AS VARCHAR), {sex_expression} "
-        f"FROM {reader}('{args.cohort}')").fetchall()
+        f"FROM {cohort_src}").fetchall()
     people = [r[0] for r in rows_in]
     sex_of = {r[0]: r[1] for r in rows_in}
 
@@ -118,19 +130,15 @@ def main() -> None:
     if args.release:
         info = args.release / "phecode_info.parquet"
         if info.is_file():
-            columns = {r[0] for r in con.execute(
-                f"DESCRIBE SELECT * FROM read_parquet('{info}')").fetchall()}
-            if {"phecode", "sex"} <= columns:
-                restrict = {r[0]: r[1] for r in con.execute(
-                    f"SELECT phecode, upper(trim(sex)) FROM read_parquet('{info}') "
-                    f"WHERE upper(trim(sex)) IN ('MALE','FEMALE')").fetchall()}
+            restrict = load_phecode_restrictions(con, relation_for(info))
     if restrict and not has_sex:
         raise SystemExit("--release names sex-restricted phecodes but --cohort has no sex "
                          "column; the curve would overstate retention. Supply a cohort with sex.")
     if args.release and not restrict:
         print("note: the release restricts no phecode by sex, so every phecode is scored "
               "against the whole sample")
-    cases = con.execute(f"SELECT CAST(person_id AS VARCHAR), phecode FROM read_parquet('{args.person_phecodes}')").fetchall()
+    cases = con.execute(f"SELECT CAST(person_id AS VARCHAR), phecode "
+                        f"FROM {relation_for(args.person_phecodes)}").fetchall()
     by_phecode: dict[str, set] = defaultdict(set)
     for person_id, phecode in cases:
         by_phecode[str(phecode)].add(person_id)
@@ -153,8 +161,10 @@ def main() -> None:
         retained = 0
         for phecode, case_people in by_phecode.items():
             cases_n = len(case_people & selected)
-            evaluable = {"MALE": n_male, "FEMALE": n_female}.get(restrict.get(phecode), n)
-            if cases_n >= args.min_cases and evaluable - cases_n >= args.min_controls:
+            evaluable = eligible_count(restrict.get(phecode), n_male=n_male,
+                                       n_female=n_female, n_all=n)
+            if is_retained(cases_n, controls_from_evaluable(evaluable, cases_n),
+                           min_cases=args.min_cases, min_controls=args.min_controls):
                 retained += 1
         rows.append({"sample_size": n, "retained_phecodes": retained,
                      "min_cases": args.min_cases, "min_controls": args.min_controls,

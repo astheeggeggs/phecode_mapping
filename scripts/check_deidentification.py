@@ -26,7 +26,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import duckdb
+from phecodex_mapper.io import connect, quote, relation_for
 
 
 def main() -> None:
@@ -39,10 +39,14 @@ def main() -> None:
                          help="Override the raw extract's id column (default: eid or f.eid).")
     args = parser.parse_args()
 
-    con = duckdb.connect()
-    con.execute("SET preserve_insertion_order = false")
+    # connect() already sets preserve_insertion_order and pins TimeZone=UTC; this used
+    # to hand-copy the first of those and drop the second.
+    con = connect()
 
-    raw = f"read_csv_auto('{args.input}', all_varchar=true, sample_size=-1)"
+    # Kept bespoke rather than relation_for(): the raw UKB extract needs
+    # sample_size=-1 so the dialect/column sniff reads the whole file, and a wide .tab
+    # extract is exactly where a truncated sniff goes wrong.
+    raw = f"read_csv_auto('{quote(args.input)}', all_varchar=true, sample_size=-1)"
     columns = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {raw}").fetchall()]
     id_column = args.id_column or ("eid" if "eid" in columns else "f.eid")
     if id_column not in columns:
@@ -51,8 +55,8 @@ def main() -> None:
 
     con.execute(f'CREATE TABLE real_ids AS SELECT DISTINCT trim(CAST("{id_column}" AS VARCHAR)) '
                 f"AS eid FROM {raw} WHERE \"{id_column}\" IS NOT NULL")
-    con.execute(f"CREATE TABLE cohort AS SELECT * FROM read_csv_auto('{args.cohort}', all_varchar=true)")
-    con.execute(f"CREATE TABLE events AS SELECT * FROM read_csv_auto('{args.events}', all_varchar=true)")
+    con.execute(f"CREATE TABLE cohort AS SELECT * FROM {relation_for(args.cohort)}")
+    con.execute(f"CREATE TABLE events AS SELECT * FROM {relation_for(args.events)}")
 
     n_real = con.execute("SELECT count(*) FROM real_ids").fetchone()[0]
     n_cohort = con.execute("SELECT count(*) FROM cohort").fetchone()[0]

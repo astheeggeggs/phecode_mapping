@@ -204,8 +204,17 @@ Before trusting the curve, confirm its last point reproduces your run:
 
 It compares three numbers that must agree — the run's own `retained` flag, the
 thresholds reapplied to the run's counts, and the curve's model — and if they do not,
-names the phecodes responsible. A curve that disagrees at full cohort size is wrong at
-every smaller size too.
+names the phecodes responsible **and attributes the gap**. A curve that disagrees at
+full cohort size is wrong at every smaller size too.
+
+The expected disagreement is the control pool. The curve computes controls as
+*evaluable people − cases*; a run also removes sub-threshold carriers (under
+`--case-rule two-dates`) and non-cases named by `--control-exclusions`. The reconciler
+reports that as its `removed` column, which is the run's own
+`control_count_before_exclusions − control_count_after_exclusions`. Where `removed`
+accounts for the gap, the run is right and the curve is an upper bound — as documented.
+Anything `removed` does **not** account for is flagged separately and means the run
+directory is not from a single run.
 
 **Pass `--release`.** Without it every phecode is scored against the whole sample, and
 the ~325 sex-restricted phecodes get a denominator twice their real one — so the curve

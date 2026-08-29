@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import duckdb
+from phecodex_mapper.io import connect, relation_for
 
 # Phecodes whose approximate hospital-coded prevalence in a UK Biobank-like cohort is
 # well enough characterised to be worth eyeballing. The bands are deliberately WIDE and
@@ -70,10 +70,15 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=40, help="How many commonest phecodes to list.")
     args = parser.parse_args()
 
-    con = duckdb.connect()
-    con.execute(f"CREATE VIEW counts AS SELECT * FROM read_parquet('{args.run / 'phecode_counts.parquet'}')")
-    con.execute(f"CREATE VIEW info AS SELECT * FROM read_parquet('{args.release / 'phecode_info.parquet'}')")
-    con.execute(f"CREATE VIEW matrix AS SELECT * FROM read_parquet('{args.run / 'phenotype_matrix.parquet'}')")
+    # connect()/relation_for(), not duckdb.connect() and a hardcoded reader. The
+    # hardcoded read_csv_auto below used to make this script die on a Parquet cohort --
+    # a cohort the mapper itself accepts -- AFTER printing the prevalence bands and
+    # BEFORE the sex-restriction block, which is the sharpest check here. An analyst got
+    # a plausible partial report and a traceback, with the strongest guard never run.
+    con = connect()
+    con.execute(f"CREATE VIEW counts AS SELECT * FROM {relation_for(args.run / 'phecode_counts.parquet')}")
+    con.execute(f"CREATE VIEW info AS SELECT * FROM {relation_for(args.release / 'phecode_info.parquet')}")
+    con.execute(f"CREATE VIEW matrix AS SELECT * FROM {relation_for(args.run / 'phenotype_matrix.parquet')}")
 
     n_people = con.execute("SELECT count(*) FROM matrix").fetchone()[0]
     print(f"cohort: {n_people:,} people\n")
@@ -107,15 +112,22 @@ def main() -> None:
             problems.append(f"{phecode} at {rate:.2%}, expected {lo:.0%}-{hi:.0%}")
 
     print("\n=== Sex restriction on real data (the sharpest check: expected answer is exact) ===")
-    con.execute(f"CREATE VIEW cohort AS SELECT * FROM read_csv_auto('{args.cohort}')")
+    con.execute(f"CREATE VIEW cohort AS SELECT * FROM {relation_for(args.cohort)}")
     matrix_columns = {r[0] for r in con.execute("DESCRIBE matrix").fetchall()}
     for phecode, expected_sex in SEX_CHECKS.items():
         if phecode not in matrix_columns:
             print(f"  {phecode:10s} not retained in this run")
             continue
+        # CAST both sides to VARCHAR, as mapper.py does when it builds `cohort` and the
+        # matrix. USING (person_id) leaves the comparison type to DuckDB, which for a
+        # Parquet cohort with an integer person_id against the matrix's VARCHAR column
+        # resolves the other way -- '007' and 7 would match here and not in the run. The
+        # sharpest check in this script must not be joining on different semantics from
+        # the thing it is checking.
         wrong = con.execute(f"""
-          SELECT count(*) FROM matrix m JOIN cohort c USING (person_id)
-          WHERE m."{phecode}" IS NOT NULL AND upper(trim(c.sex)) <> upper(?)
+          SELECT count(*) FROM matrix m
+          JOIN cohort c ON CAST(c.person_id AS VARCHAR) = CAST(m.person_id AS VARCHAR)
+          WHERE m."{phecode}" IS NOT NULL AND upper(trim(CAST(c.sex AS VARCHAR))) <> upper(?)
         """, [expected_sex]).fetchone()[0]
         scored = con.execute(
             f'SELECT count(*) FROM matrix WHERE "{phecode}" IS NOT NULL').fetchone()[0]

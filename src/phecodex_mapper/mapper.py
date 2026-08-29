@@ -7,7 +7,10 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
+from .diagnostics import unmapped_by_vocabulary
 from .io import ANALYSIS_TIMEZONE, checksum, connect, pin_workbook_timestamps, quote, relation_for
+from .retention import (
+    eligible_count_sql, evaluable_predicate, restriction_query_sql, retained_sql)
 
 
 def _columns(con, source: str) -> set[str]:
@@ -298,11 +301,10 @@ def _load_phecode_sex(con, release: Path) -> dict:
         info_view = f"read_parquet('{quote(info_path)}')"
         if {"phecode", "sex"} <= _columns(con, info_view):
             release_has_sex = True
-            con.execute(f"""
-              INSERT INTO phecode_sex
-              SELECT phecode, upper(trim(sex)) FROM {info_view}
-              WHERE upper(trim(sex)) IN ('MALE', 'FEMALE')
-            """)
+            # retention.restriction_query_sql, not a local `upper(trim(sex))`: the
+            # attrition tooling reads the same column through that function, and two
+            # spellings of the same canonicalisation is how they came to disagree.
+            con.execute(f"INSERT INTO phecode_sex {restriction_query_sql(info_view)}")
     con.execute("""
       CREATE TABLE cohort_sex_counts AS
       SELECT count(*) AS n_all,
@@ -325,7 +327,9 @@ def _load_phecode_sex(con, release: Path) -> dict:
 
 
 # A person counts toward a phecode only if the phecode is unrestricted or their sex matches.
-EVALUABLE = "(ps.restrict_sex IS NULL OR c.sex = ps.restrict_sex)"
+# Defined in retention.py so the attrition tooling scores phecodes the same way this does
+# rather than re-implementing the rule and being audited for drift afterwards.
+EVALUABLE = evaluable_predicate()
 
 
 def _apply_control_exclusions(con, target_table: str, mapped_table: str) -> dict:
@@ -449,11 +453,12 @@ def _build_cases_and_counts(con, *, mapped_table: str, exclusions_table: str,
       WHERE ca.person_id IS NULL AND {EVALUABLE}
     """)
     con.execute(f"CREATE TABLE {all_phecodes} AS SELECT DISTINCT m.phecode AS phecode FROM {mapped_table} m WHERE {not_excluded}")
+    eligible_sql = eligible_count_sql("ps.restrict_sex", n_male="s.n_male",
+                                      n_female="s.n_female", n_all="s.n_all")
     con.execute(f"""
       CREATE TABLE {eligible} AS
       SELECT p.phecode,
-             CASE ps.restrict_sex WHEN 'MALE' THEN s.n_male WHEN 'FEMALE' THEN s.n_female
-                  ELSE s.n_all END AS eligible_count
+             {eligible_sql} AS eligible_count
       FROM {all_phecodes} p LEFT JOIN phecode_sex ps USING (phecode) CROSS JOIN cohort_sex_counts s
     """)
     con.execute(f"""
@@ -480,7 +485,9 @@ def _build_cases_and_counts(con, *, mapped_table: str, exclusions_table: str,
         GROUP BY m.phecode
       ) ec ON ec.phecode = p.phecode
     """)
-    con.execute(f"ALTER TABLE {counts} ADD COLUMN retained BOOLEAN; UPDATE {counts} SET retained = case_count >= {int(min_cases)} AND control_count_after_exclusions >= {int(min_controls)}")
+    retained = retained_sql("case_count", "control_count_after_exclusions",
+                           min_cases=min_cases, min_controls=min_controls)
+    con.execute(f"ALTER TABLE {counts} ADD COLUMN retained BOOLEAN; UPDATE {counts} SET retained = {retained}")
 
 
 def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_rule: str = "any-event", exclusions: Path | None = None, min_cases: int = 200, min_controls: int = 200, max_unmapped_rate: float = 1.0, exclude_phenotypes: Path | None = None) -> None:
@@ -680,58 +687,7 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
               file=sys.stderr)
     unmapped = con.execute("SELECT count(*) FROM unmapped_events").fetchone()[0]
     rate = unmapped / total if total else 0
-    # Per-vocabulary, not just overall. A whole vocabulary mapping badly is a
-    # different problem from a long tail of odd codes, and the aggregate hides it:
-    # two real runs sat at 23.7-23.8% unmapped and nothing remarked on it. The
-    # specific failure this surfaces is a mislabelled vocabulary -- UK Biobank codes
-    # WHO ICD-10, and events labelled ICD10CM are matched against the CM map, so
-    # every WHO-only code is silently discarded. `vocabulary` is taken as ground
-    # truth and nothing else can detect that.
-    by_vocabulary = {
-        v: {"events": n, "unmapped": u, "unmapped_rate": (u / n if n else 0)}
-        for v, n, u in con.execute("""
-          SELECT e.vocabulary, count(*), count(*) FILTER (
-            WHERE NOT EXISTS (SELECT 1 FROM mapped_events m WHERE m.event_id = e.event_id))
-          FROM normalized_events e GROUP BY e.vocabulary ORDER BY e.vocabulary
-        """).fetchall()}
-    # Advisory only: --max-unmapped-rate defaults to 1.0 so the hard check below can
-    # never fire, which is a deliberate default (a site cannot know its rate before
-    # the first run) but leaves nothing to notice a bad one. This warns instead.
-    #
-    # A high unmapped rate is NOT evidence of mislabelling by itself. PhecodeX's WHO
-    # map is genuinely coarse, so a correctly-labelled UK Biobank extract sits at
-    # 20.3% -- warning on the rate alone fires on the right answer and points the
-    # analyst at the wrong one, and following it corrupts the run. What discriminates
-    # is the counterfactual: of the events that FAILED, how many would map under the
-    # sibling ICD-10 label? Measured on 2.5M UK Biobank events, correctly labelled
-    # ICD10 rescues 0.8% of its failures under ICD10CM, while the same events
-    # mislabelled ICD10CM rescue 19.8% under ICD10 -- a 24x separation, against only
-    # 4.8 points between the two overall rates. The 5% threshold sits ~6x above the
-    # false-alarm case and ~4x below the true one.
-    sibling_of = {"ICD10": "ICD10CM", "ICD10CM": "ICD10"}
-    for vocabulary, stats in by_vocabulary.items():
-        sibling = sibling_of.get(vocabulary)
-        if not sibling or stats["events"] < 1000 or not stats["unmapped"]:
-            continue
-        rescued = con.execute("""
-          SELECT count(*) FROM normalized_events e
-          WHERE e.vocabulary = ?
-            AND NOT EXISTS (SELECT 1 FROM mapped_events m WHERE m.event_id = e.event_id)
-            AND EXISTS (SELECT 1 FROM icd_map m
-                        WHERE m.normalized_code = e.normalized_code AND m.vocabulary = ?)
-        """, [vocabulary, sibling]).fetchone()[0]
-        share = rescued / stats["unmapped"]
-        stats["sibling_vocabulary"] = sibling
-        stats["unmapped_events_that_would_map_as_sibling"] = rescued
-        stats["share_of_unmapped_rescued_by_sibling"] = share
-        if share > 0.05:
-            print(f"phecodex-map: warning: {vocabulary} looks mislabelled. "
-                  f"{stats['unmapped']:,} of {stats['events']:,} {vocabulary} events "
-                  f"({stats['unmapped_rate']:.1%}) did not map, and {share:.1%} of those "
-                  f"({rescued:,} events) WOULD map if they were labelled {sibling}. A correctly "
-                  f"labelled extract sits near 1%. Check which ICD-10 your source actually uses "
-                  f"-- UK Biobank is WHO ICD10, not ICD10CM -- and re-run; do not relabel on the "
-                  f"unmapped rate alone.", file=sys.stderr)
+    by_vocabulary = unmapped_by_vocabulary(con)
     audit = {"created_at_utc": dt.datetime.now(dt.UTC).isoformat(), "release": str(release), "case_rule": case_rule,
              # Pinned, not observed: two sites must resolve a timestamp to the same
              # calendar date or two-dates gives them different case sets. See io.connect.
