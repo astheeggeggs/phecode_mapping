@@ -48,8 +48,20 @@ def redot_icd10(code: str) -> str:
     return code if len(code) <= 3 else f"{code[:3]}.{code[3:]}"
 
 
-def redot_file(input_path: Path, output_path: Path) -> int:
+# PheTK compares vocabulary_id against these strings and derives its own 9/10 internally
+# (polars: `when(col("vocabulary_id") == "ICD9") ...`), so a NUMERIC vocabulary_id makes
+# PheTK itself fail with "cannot compare string with numeric type". The custom phecode
+# map's `flag` column is 9/10; the ICD *file*'s vocabulary_id is not. Passing a
+# numerically-labelled file through unchanged used to report "0 codes" and look like a
+# successful no-op, so the mistake only surfaced later as PheTK apparently disagreeing.
+ICD9_LABELS = {"ICD9", "ICD9CM"}
+ICD10_LABELS = {"ICD10", "ICD10CM"}
+NUMERIC_LABELS = {"9", "10"}
+
+
+def redot_file(input_path: Path, output_path: Path) -> tuple[int, int]:
     n_changed = 0
+    n_recognised = 0
     with input_path.open(newline="") as fin, output_path.open("w", newline="") as fout:
         reader = csv.DictReader(fin)
         writer = csv.writer(fout)
@@ -57,16 +69,23 @@ def redot_file(input_path: Path, output_path: Path) -> int:
         for row in reader:
             code = row["ICD"]
             vocab = row["vocabulary_id"].strip().upper()
-            if vocab == "ICD9CM":
-                new_code = redot_icd9(code)
-            elif vocab == "ICD10CM":
-                new_code = redot_icd10(code)
+            if vocab in NUMERIC_LABELS:
+                raise SystemExit(
+                    f"vocabulary_id is {vocab!r}, but PheTK matches it as a string against "
+                    f"{sorted(ICD9_LABELS | ICD10_LABELS)} and will fail with 'cannot compare "
+                    f"string with numeric type'. The 9/10 form belongs in the phecode map's "
+                    f"`flag` column, not in the ICD file. Re-export vocabulary_id as e.g. "
+                    f"'ICD9CM'/'ICD10CM'.")
+            if vocab in ICD9_LABELS:
+                new_code, n_recognised = redot_icd9(code), n_recognised + 1
+            elif vocab in ICD10_LABELS:
+                new_code, n_recognised = redot_icd10(code), n_recognised + 1
             else:
                 new_code = code
             if new_code != code:
                 n_changed += 1
             writer.writerow([row["person_id"], row["date"], row["vocabulary_id"], new_code])
-    return n_changed
+    return n_changed, n_recognised
 
 
 def main() -> None:
@@ -76,8 +95,15 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path,
                          help="Path to write the re-punctuated copy.")
     args = parser.parse_args()
-    n_changed = redot_file(args.input, args.output)
-    print(f"Re-inserted decimals into {n_changed} codes; wrote {args.output}")
+    n_changed, n_recognised = redot_file(args.input, args.output)
+    if not n_recognised:
+        raise SystemExit(
+            f"No row in {args.input} had a recognised vocabulary_id. Expected one of "
+            f"{sorted(ICD9_LABELS | ICD10_LABELS)}. Nothing was re-dotted, so the output "
+            f"is a copy of the input and a PheTK comparison against it would understate "
+            f"PheTK purely on code spelling.")
+    print(f"Re-inserted decimals into {n_changed} of {n_recognised} recognised codes; "
+          f"wrote {args.output}")
 
 
 if __name__ == "__main__":

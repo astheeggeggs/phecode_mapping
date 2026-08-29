@@ -169,6 +169,34 @@ upper bound rather than a prediction of a real run. Those limitations are record
 the output metadata. The CSV and SVG are aggregate and safe to share where your data
 agreement permits; the inputs are not.
 
+## Prevalence sanity check
+
+Run this once, on your real cohort, after your first full run. It is the only check
+that can catch a whole class of error the test suite cannot reach: every automated
+check in this repo is internal consistency, and none of them can tell you whether
+hypertension comes out at 25% or at 2.5%.
+
+```bash
+.venv/bin/python scripts/check_prevalence.py \
+  --run phecodex_run \
+  --release release \
+  --cohort cohort.csv \
+  --out prevalence.csv
+```
+
+It reports three things: named common phecodes against wide order-of-magnitude bands,
+sex-restricted phecodes (where the expected number of wrong-sex people scored is
+**exactly zero**, which makes it the sharpest check available), and the commonest
+phecodes in your data for eyeballing.
+
+Treat the bands as a smoke alarm, not a validation: they are set wide enough to catch
+something broken by a factor of ten, and a single near-miss is more likely the band
+being wrong for your cohort than a mapping error. Several at once, or anything wrong
+by an order of magnitude, is worth investigating.
+
+The output is aggregate — counts and rates, no `person_id`, no per-person rows — but
+check it against your own data-sharing agreement before moving it anywhere.
+
 ## Containers
 
 The repository includes `containers/Dockerfile` and

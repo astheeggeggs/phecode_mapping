@@ -8,7 +8,7 @@ WORKDIR ${PHECODEX_HOME}
 
 COPY requirements-lock.txt pyproject.toml README.md ANALYST_GUIDE.md ./
 COPY src ./src
-COPY scripts/verify_release.py scripts/prepare_ukb_for_mapping.R scripts/plot_phecode_attrition.py scripts/package_distribution.py ./scripts/
+COPY scripts/verify_release.py scripts/prepare_ukb_for_mapping.R scripts/plot_phecode_attrition.py scripts/package_distribution.py scripts/check_prevalence.py ./scripts/
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir -r requirements-lock.txt \

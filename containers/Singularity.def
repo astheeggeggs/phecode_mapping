@@ -11,6 +11,7 @@ From: python:3.11-slim
     scripts/prepare_ukb_for_mapping.R /opt/phecodex/scripts/prepare_ukb_for_mapping.R
     scripts/plot_phecode_attrition.py /opt/phecodex/scripts/plot_phecode_attrition.py
     scripts/package_distribution.py /opt/phecodex/scripts/package_distribution.py
+    scripts/check_prevalence.py /opt/phecodex/scripts/check_prevalence.py
 
 %post
     cd /opt/phecodex
