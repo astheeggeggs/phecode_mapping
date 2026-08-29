@@ -175,6 +175,14 @@ deidentify_ukb_icd_for_testing <- function(
 	build_long <- function(col, vocabulary) {
 		out <- dt_icd[, .(codes = list(split_codes(get(col)))), by = row_index]
 		out <- out[lengths(codes) > 0]
+		# A vocabulary nobody uses is normal -- an extract of recent records may carry
+		# no ICD-9 at all -- and it must not be fatal. Grouping over zero rows leaves
+		# data.table no first group to infer column types from, so it errors out; return
+		# a typed empty table instead and let rbind below do the right thing.
+		if (!nrow(out)) {
+			return(data.table(row_index = integer(), code = character(),
+			                  vocabulary = character()))
+		}
 		out <- out[, .(code = unlist(codes)), by = row_index]
 		out[, vocabulary := vocabulary]
 		out

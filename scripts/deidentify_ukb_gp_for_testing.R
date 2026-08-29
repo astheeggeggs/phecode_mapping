@@ -5,6 +5,7 @@
 # deidentify_ukb_for_testing.R, which was run against real data). Column
 # names/sentinel dates below are UKB's documented gp_clinical.txt shape;
 # confirm against your actual extract header before trusting this as-is.
+# It IS exercised against simulated extracts by tests/test_deidentification.py.
 #
 # UKB's primary-care data ships Read v2 / CTV3 codes, not SNOMED CT concept
 # IDs directly. If you want SNOMED-coded events for testing, you must first
@@ -53,9 +54,12 @@ deidentify_gp_events <- function(events, seed = 1, max_people = NULL) {
   if (!is.null(max_people)) people <- sample(people, min(max_people, length(people)))
   events <- events[person_id %in% people]
 
-  # Scramble across individuals: shuffle the person_id <-> event-history
-  # assignment itself (not just relabeling IDs), so no real person's code
-  # sequence survives intact.
+  # Fresh synthetic IDs. This ALONE is not de-identification: a merge on person_id
+  # keeps each real person's whole event history together under the new label, and a
+  # rare code combination is identifying whatever the label says. Measured on a
+  # 60-person simulated extract, relabelling alone left 60 of 60 original code pairs
+  # intact. The block shuffle below is what actually breaks them, matching
+  # deidentify_ukb_for_testing.R.
   id_map <- data.table(person_id = people, new_id = sprintf("SIM%06d", sample(seq_along(people))))
   events <- merge(events, id_map, by = "person_id")
 
@@ -64,7 +68,20 @@ deidentify_gp_events <- function(events, seed = 1, max_people = NULL) {
   n <- nrow(events)
   events[, event_date := event_date + sample(-365:365, n, replace = TRUE)]
 
-  cohort <- data.table(person_id = id_map$new_id)
+  # Block shuffle across people: repeat each synthetic id by its event count, shuffle
+  # the whole vector, and reassign. Preserves the events-per-person distribution -- so
+  # per-phecode counts stay realistic -- while destroying which codes co-occurred in
+  # one person. Events are ordered by new_id first so the repeat vector lines up.
+  setorder(events, new_id)
+  counts <- events[, .N, by = new_id]
+  slots <- sample(rep(counts$new_id, counts$N))
+  stopifnot(length(slots) == nrow(events))
+  events[, new_id := slots]
+
+  # sex is not in gp_clinical, so it is emitted blank rather than invented. Blank is a
+  # supported value: those people are non-evaluable for sex-restricted phecodes rather
+  # than silently scored as controls. Join sex from the main extract if you need it.
+  cohort <- data.table(person_id = id_map$new_id, sex = "")
   events_out <- events[, .(person_id = new_id, code, vocabulary, event_date)]
   list(cohort = cohort, events = events_out)
 }
