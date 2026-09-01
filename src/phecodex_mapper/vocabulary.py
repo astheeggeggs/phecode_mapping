@@ -609,13 +609,14 @@ def build_vocabulary(phecodex_map: Path | list[Path], phecodex_info: Path | None
         # Present only when --recover-unmapped was used. Its absence means the map is
         # exactly what the published PhecodeX files contain.
         "recovery": recovery_summary,
-        # Which source file each vocabulary label came from. PhecodeX ships the WHO
-        # ICD-10 map twice: phecodeX_unrolled_ICD_WHO.csv labels its 20,255 rows
-        # ICD10, and phecodeX_unrolled_ICD_UKB.csv labels the byte-identical content
-        # ICD10CM. Both are upstream choices and this tool carries the label through
-        # rather than overriding it -- but that makes two releases silently
-        # incompatible with the same events file, and the label alone cannot tell you
-        # which you have. This can.
+        # Which source file each vocabulary label came from. The vocabulary_id in a
+        # source map is carried through as given rather than overridden, so an ICD10CM
+        # map here may be genuine ICD-10-CM or a WHO map whose vocabulary_id column was
+        # rewritten to ICD10CM before the build -- a relabelling that takes one sed and
+        # leaves no trace in the label. Two such releases are silently incompatible with
+        # the same events file (mapping joins on vocabulary as well as code, so events
+        # labelled ICD10 find nothing in a release whose only ICD-10 rows say ICD10CM),
+        # and the label alone cannot tell you which you have. This can.
         # `rows` counts icd_map rows so it sums to counts.icd_map_rows; `distinct_codes`
         # counts codes, which is smaller wherever one code carries several phecodes.
         # Reporting only the second under the name `rows` made two numbers in the same

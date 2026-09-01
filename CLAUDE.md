@@ -72,9 +72,10 @@ inputs go down the same path. There is no pandas dependency.
   recorded in `recovered_codes.csv`), never by a run-time heuristic. A hierarchy fallback was
   removed deliberately; do not reintroduce one.
 - **`ICD10` (WHO) and `ICD10CM` are distinct vocabularies** and the events file's `vocabulary`
-  column is ground truth. UK Biobank is `ICD10`. Upstream ships the WHO map twice, labelling one
-  copy `ICD10CM` (`phecodeX_unrolled_ICD_UKB.csv`), so releases are not interchangeable — the
-  manifest's `vocabularies` block records which source file each label came from.
+  column is ground truth. UK Biobank is `ICD10`. A release's `ICD10CM` map may be genuine
+  ICD-10-CM or a WHO map someone relabelled before the build, and the label alone cannot tell
+  the two apart, so releases are not interchangeable — the manifest's `vocabularies` block
+  records which source file each label came from.
 - **Byte-reproducibility.** Two builds from identical inputs must produce identical files. Every
   `COPY` is written in a fixed order and `io.pin_workbook_timestamps` strips wall-clock time out of
   `.xlsx` output. `manifest.json`'s `created_at_utc` is the only permitted non-determinism. Adding

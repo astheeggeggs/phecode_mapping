@@ -105,11 +105,9 @@ def test_tampering_with_the_manifest_digest_is_caught(full_release: Path) -> Non
 # ---------------------------------------------------------------------------
 # Vocabulary provenance.
 #
-# PhecodeX ships the WHO ICD-10 map twice: phecodeX_unrolled_ICD_WHO.csv labels
-# its 20,255 rows ICD10, and phecodeX_unrolled_ICD_UKB.csv labels the
-# byte-identical content ICD10CM (verified: 0 rows differ either way after
-# normalisation). Both are upstream choices, and this tool carries the label
-# through rather than overriding it.
+# A source map's vocabulary_id is carried through as given rather than overridden,
+# so an ICD10CM map in a release may be genuine ICD-10-CM or a WHO map whose
+# vocabulary_id column was rewritten to ICD10CM before the build.
 #
 # The consequence is that two releases are silently incompatible with the same
 # events file, and the vocabulary label alone cannot tell you which you have --

@@ -4,8 +4,9 @@ Applies a versioned PhecodeX mapping release to cohort ICD events and produces a
 binary phenotype matrix plus aggregate QC outputs. Mapping runs locally at each
 biobank; participant-level data never needs to leave the secure environment.
 
-**If you are an analyst running a release someone sent you**, you need four sections:
-[Install](#install), [Standard workflow](#standard-workflow),
+**If you are an analyst who has been pointed at a release**, you need five sections:
+[Get the bundle](#get-the-bundle), [Install](#install),
+[Standard workflow](#standard-workflow),
 [Input contract](#input-contract) and [Outputs](#outputs) — then
 [Quality control](#quality-control) once you have a run. If something goes wrong,
 [When a run refuses to start](#when-a-run-refuses-to-start) and
@@ -26,6 +27,29 @@ Two things catch people out:
 | **State which ICD-10 you have.** `ICD10` (WHO) and `ICD10CM` are different vocabularies. UK Biobank is `ICD10`. The wrong label does not fail — it quietly drops or misassigns events. | [detail](#you-must-state-which-icd-10-you-are-mapping) |
 | **Never leave a cell blank in an exclusions file.** A blank would void the whole rule, so a run refuses the file instead of accepting it. | [detail](#exclusion-files-must-not-have-blank-cells) |
 
+## Get the bundle
+
+A release is distributed as an analyst bundle — one `.tar.gz` published as a
+[GitHub Release](https://github.com/astheeggeggs/phecode_mapping/releases),
+alongside a `.sha256` sidecar. Download both, then:
+
+```bash
+shasum -a 256 -c phecodex-cm1.1-who1.0-icd-only.tar.gz.sha256
+tar xzf phecodex-cm1.1-who1.0-icd-only.tar.gz
+cd phecodex-distribution
+```
+
+The archive extracts to a single directory, `phecodex-distribution`. **Every command
+in this README is run from inside it**, which is why a bare `--release release`
+resolves: the release is a subdirectory of the bundle, not the download itself. So
+is the mapper — `pip install .` below installs the code that shipped with this
+release, not a separately obtained copy.
+
+Check the `.sha256` even though step 1 of the workflow verifies the release too.
+The two checks answer different questions: `verify_release.py` re-hashes the release
+against its own `manifest.json`, so it cannot tell you the download arrived intact
+or that it was the bundle you were meant to have.
+
 ## Install
 
 Python 3.11 or newer is required. For a pinned installation:
@@ -41,8 +65,8 @@ see [ANALYST_GUIDE.md](ANALYST_GUIDE.md).
 
 ## Standard workflow
 
-Three commands. `release` is the directory you were sent — inside an extracted
-analyst bundle it is literally called `release`.
+Three commands, run from the extracted bundle (see [Get the bundle](#get-the-bundle)).
+`release` is the release directory inside it.
 
 ```bash
 # 1. Confirm the release is intact and is the one that was built for you.
@@ -146,11 +170,14 @@ near 1%, mislabelled data near 20%, and a run warns on stderr when a vocabulary 
 least 1,000 events crosses 5%. Do not relabel your events on the unmapped rate alone.
 
 **Check the release expects the label you are sending it.** `manifest.json` records, under
-`vocabularies`, which source file each label came from — worth checking, because
-PhecodeX ships the WHO map twice: `phecodeX_unrolled_ICD_WHO.csv` labels it `ICD10`
-while `phecodeX_unrolled_ICD_UKB.csv` labels byte-identical content `ICD10CM`. A
-release built from the UKB file therefore expects `ICD10CM` events, and pairing it
-with correctly-labelled `ICD10` events leaves 98% of them unmapped.
+`vocabularies`, which source file each label came from — worth checking, because an
+`ICD10CM` map is not self-evidently ICD-10-CM. Nothing stops a release being built
+from a WHO map whose `vocabulary_id` column was rewritten to `ICD10CM` before the
+build, and the label alone cannot tell you which you hold. It matters because mapping
+joins on vocabulary as well as code: send correctly-labelled `ICD10` events to a
+release whose only ICD-10 vocabulary is that relabelled `ICD10CM` map and *none* of
+them map, because the release has no `ICD10` rows to match against at all. The source
+file recorded per vocabulary is what makes the two cases distinguishable.
 
 Codes with no entry in the map are listed in `unmapped_events.csv`; review that file
 rather than assuming a low unmapped rate means good coverage. A code's absence is a
@@ -310,7 +337,7 @@ files rather than in the command.
 
 | the message says | what it means | what to do |
 |---|---|---|
-| `Release directory does not exist` or `Release is incomplete; missing:` | `--release` is not pointing at a release directory | inside an extracted bundle the directory is called `release` |
+| `Release directory does not exist` or `Release is incomplete; missing:` | `--release` is not pointing at a release directory | run from inside the extracted `phecodex-distribution`, where the directory is called `release` |
 | `manifest.json records no artifact checksums` | the release predates checksummed builds and its contents cannot be verified | ask whoever sent it for a release rebuilt with a current `build-vocabulary` |
 | `snomed_map.parquet is present … not recorded in manifest.json` | the release carries a file it does not claim | run `scripts/verify_release.py`; do not use the release until it passes |
 | `Output directory already exists` | runs never overwrite | remove it, or pass a new `--output` |
