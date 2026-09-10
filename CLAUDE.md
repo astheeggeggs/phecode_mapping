@@ -22,7 +22,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements-lock.txt && .venv/
   --recovery-adjudication data/icd_recovery_adjudication.csv \
   --icd-only --output releases/phecodex-1.1-analyst
 
-# Maintainer: bundle a release for other sites (refuses any release carrying SNOMED tables)
+# Maintainer: bundle a release for other sites (refuses SNOMED tables unless --allow-snomed)
 .venv/bin/python scripts/package_distribution.py --release releases/... --output distributions/....tar.gz
 
 # Analyst: verify, preflight, map
@@ -124,8 +124,9 @@ is vacuous.
 `distributions/`, `hierarchy_sources/`, and `phecodeX_*.csv` — several of these exist in the working
 tree but must never be committed. Participant-level data, Athena/SNOMED sources, and generated
 releases stay out of version control; analyst bundles are published as GitHub Releases. Athena-derived
-content is separately licensed and must not be redistributed, which is why shared releases are built
-`--icd-only`. Scripts that touch real data (`scripts/*.R`, `check_deidentification.py`,
+content is separately licensed and must not be redistributed, which is why published releases are built
+`--icd-only`; `package_distribution.py --allow-snomed` is the audited exception for a direct transfer to
+one Athena-licensed site, and stamps a redistribution notice into the archive. Scripts that touch real data (`scripts/*.R`, `check_deidentification.py`,
 `check_prevalence.py`) are designed to emit aggregate counts only.
 
 Prose documentation is split deliberately: `README.md` above "What the map contains" is the analyst
