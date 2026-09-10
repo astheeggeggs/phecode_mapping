@@ -442,3 +442,86 @@ def test_every_phecode_named_by_the_prevalence_check_exists_and_is_restricted() 
         assert phecode in known, f"{phecode} is not a phecode, so its sex check never runs"
         assert known[phecode] == expected_sex, \
             f"{phecode} is restricted to {known[phecode]}, not {expected_sex}"
+
+
+def _snomed_release(tmp_path: Path, name: str):
+    """The same fixture as _icd_only_release, but shipping the bridge it built.
+
+    Identical inputs and flags apart from icd_only, so a difference between the two
+    bundles is attributable to the flag and nothing else.
+    """
+    from conftest import write_csv
+    from phecodex_mapper.vocabulary import build_vocabulary
+
+    source = tmp_path / f"src_{name}.csv"
+    write_csv(source, ["phecode", "ICD", "vocabulary_id"], [["ID_052", "003.3", "ICD9CM"]])
+    athena = tmp_path / f"ath_{name}"
+    athena.mkdir()
+    write_csv(athena / "CONCEPT.csv",
+              ["concept_id", "concept_code", "vocabulary_id", "domain_id", "standard_concept", "invalid_reason"],
+              [[4, "003.3", "ICD9CM", "Condition", "", ""], [3, "B02.1", "ICD10", "Condition", "", ""],
+               [5, "77386006", "SNOMED", "Condition", "S", ""]])
+    write_csv(athena / "CONCEPT_RELATIONSHIP.csv",
+              ["concept_id_1", "concept_id_2", "relationship_id", "invalid_reason"],
+              [[4, 5, "Maps to", ""], [3, 5, "Maps to", ""]])
+    release = tmp_path / name
+    build_vocabulary(source, None, release, athena, recover_unmapped=True, icd_only=False)
+    assert (release / "snomed_map.parquet").is_file(), "fixture ships no SNOMED table, so it proves nothing"
+    return release
+
+
+def test_packaging_refuses_a_snomed_release_without_the_opt_in(tmp_path: Path) -> None:
+    """The default must stay a refusal, because the bundle it writes is the published one.
+
+    This guard had no test at all: --allow-snomed could have been given the wrong
+    default, or the flag could have disabled the check outright, and the suite would
+    have stayed green.
+    """
+    release = _snomed_release(tmp_path, "snomed1")
+    bundle = tmp_path / "refused.tar.gz"
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/package_distribution.py"),
+                             "--release", str(release), "--output", str(bundle)],
+                            capture_output=True, text=True)
+    assert result.returncode != 0, "packaging accepted SNOMED-derived tables by default"
+    assert not bundle.exists(), "a refused packaging run still wrote a bundle"
+    assert not bundle.with_name(bundle.name + ".sha256").exists()
+
+
+def test_allow_snomed_bundles_the_tables_and_the_notice(tmp_path: Path) -> None:
+    """The opt-in path: a self-contained bundle for one Athena-licensed site.
+
+    The release directory alone is not usable -- it carries no mapper -- so a site
+    given SNOMED support needs the same tool and docs the ICD-only bundle ships.
+    The notice must be in the ARCHIVE and not in release/: writing anything under
+    release/ changes manifest.json's hash and invalidates every audit.json built
+    against that release (S14).
+    """
+    release = _snomed_release(tmp_path, "snomed2")
+    before = json.loads((release / "manifest.json").read_text())
+    bundle = tmp_path / "allowed.tar.gz"
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/package_distribution.py"),
+                             "--release", str(release), "--output", str(bundle),
+                             "--allow-snomed"], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    with tarfile.open(bundle) as archive:
+        names = archive.getnames()
+        assert "phecodex-distribution/SNOMED_REDISTRIBUTION_NOTICE.txt" in names, \
+            "the bundle carries SNOMED tables but no notice saying it may not be shared"
+        notice = archive.extractfile("phecodex-distribution/SNOMED_REDISTRIBUTION_NOTICE.txt").read().decode()
+    assert "phecodex-distribution/release/snomed_map.parquet" in names
+    assert "phecodex-distribution/release/icd_map.parquet" in names
+    # Self-contained: the mapper and every documented script, exactly as the ICD-only
+    # bundle ships them. A SNOMED bundle that needs the ICD-only bundle beside it to
+    # be usable is not an alternative to it.
+    assert "phecodex-distribution/src/phecodex_mapper/mapper.py" in names
+    missing = sorted(s for s in documented_scripts() if f"phecodex-distribution/{s}" not in names)
+    assert missing == [], f"SNOMED bundle omits documented scripts: {missing}"
+    assert "must not be published" in result.stderr, "the opt-in packaged silently"
+    assert "separately licensed" in notice
+
+    assert json.loads((release / "manifest.json").read_text()) == before, \
+        "packaging modified the release it read"
+    assert "SNOMED_REDISTRIBUTION_NOTICE" not in "".join(
+        n for n in names if n.startswith("phecodex-distribution/release/")), \
+        "the notice was written into the release, changing its manifest hash"

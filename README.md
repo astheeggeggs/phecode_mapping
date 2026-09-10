@@ -717,10 +717,32 @@ python scripts/package_distribution.py \
   --output distributions/phecodex-cm1.1-who1.0-icd-only.tar.gz
 ```
 
-The release must be ICD-only — packaging refuses any release carrying SNOMED-derived
-tables, so build it with `--icd-only`. A `.sha256` sidecar is written alongside; send it
-separately from the archive so a recipient can check the download. Packaging never
-modifies the release it reads.
+A bundle for general publication must be ICD-only — packaging refuses any release
+carrying SNOMED-derived tables, so build it with `--icd-only`. A `.sha256` sidecar is
+written alongside; send it separately from the archive so a recipient can check the
+download. Packaging never modifies the release it reads.
+
+#### Bundling a SNOMED release for one licensed site
+
+`--allow-snomed` lifts that refusal for a bundle you hand directly to a named site
+that holds its own Athena licence. The result is self-contained — the same tool,
+scripts and docs as the ICD-only bundle, with `snomed_map.*` in the release — so the
+recipient needs nothing else:
+
+```bash
+python scripts/package_distribution.py \
+  --release releases/phecodex-1.1-snomed \
+  --output distributions/phecodex-1.1-snomed-bundle.tar.gz \
+  --allow-snomed
+```
+
+The command warns on stderr and adds `SNOMED_REDISTRIBUTION_NOTICE.txt` to the
+archive, because the bundle is otherwise indistinguishable from the publishable one
+apart from two files inside `release/`. **Do not publish what it writes.** Prefer
+having the other site build the release from their own Athena extract where you can:
+builds are byte-reproducible, so they get an identical map and no redistribution
+question arises. Compare `manifest.json`'s `artifacts` digests to prove two
+independently built releases match.
 
 Use the official [PhecodeX vocabulary repository](https://github.com/PheWAS/PhecodeXVocabulary)
 for source maps and record their checksums. The release builder records source
