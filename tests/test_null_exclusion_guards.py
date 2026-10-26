@@ -69,7 +69,7 @@ def test_a_well_formed_exclusion_still_works(tmp_path: Path, rel: Path) -> None:
     out = _run(tmp_path, rel, [["EM_202", "code", "I10", "ICD10CM"]], "good")
     excluded, after = duckdb.sql(
         "SELECT excluded_control_count, control_count_after_exclusions FROM "
-        f"read_parquet('{out / 'phecode_counts.parquet'}') WHERE phecode='EM_202'").fetchone()
+        f"read_parquet('{out / 'phecode_counts.parquet'}') WHERE phecode='EM_202'").fetchall()[0]
     assert (excluded, after) == (2, 2)
 
 

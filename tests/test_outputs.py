@@ -25,7 +25,7 @@ def test_release_artifacts_and_manifest(release) -> None:
         "the ambiguous combined adapter should no longer be written"
     manifest = json.loads((release / "manifest.json").read_text())
     assert manifest["counts"]["icd_map_rows"] == 4
-    assert duckdb.sql(f"SELECT count(*) FROM read_parquet('{release / 'icd_map.parquet'}')").fetchone()[0] == 4
+    assert duckdb.sql(f"SELECT count(*) FROM read_parquet('{release / 'icd_map.parquet'}')").fetchall()[0][0] == 4
 
 
 def test_build_vocabulary_and_map_phecodes_refuse_existing_output(tmp_path: Path, release: Path) -> None:

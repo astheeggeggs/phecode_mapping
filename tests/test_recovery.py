@@ -123,7 +123,7 @@ def test_recovery_does_not_feed_back_into_the_snomed_bridge(tmp_path: Path, fixt
     build_vocabulary(source, None, plain, athena)
     build_vocabulary(source, None, rec, athena, recover_unmapped=True)
     rows = lambda p: duckdb.sql(
-        f"SELECT count(*) FROM read_parquet('{p / 'snomed_map.parquet'}')").fetchone()[0]
+        f"SELECT count(*) FROM read_parquet('{p / 'snomed_map.parquet'}')").fetchall()[0][0]
     assert rows(plain) == rows(rec)
 
 
@@ -186,7 +186,7 @@ def test_every_added_row_is_listed_with_its_route(tmp_path: Path, fixture) -> No
     source, athena = fixture
     release = tmp_path / "rel_a"
     build_vocabulary(source, None, release, athena, recover_unmapped=True)
-    rows = duckdb.sql(f"SELECT count(*) FROM read_csv_auto('{release / 'recovered_codes.csv'}')").fetchone()[0]
+    rows = duckdb.sql(f"SELECT count(*) FROM read_csv_auto('{release / 'recovered_codes.csv'}')").fetchall()[0][0]
     assert rows == json.loads((release / "manifest.json").read_text())["recovery"]["rows_added"]
     columns = [r[0] for r in duckdb.sql(
         f"DESCRIBE SELECT * FROM read_csv_auto('{release / 'recovered_codes.csv'}')").fetchall()]
@@ -334,7 +334,7 @@ def test_recovery_counters_reconcile_against_the_map_itself(tmp_path: Path) -> N
 
 
 def _snomed_rows(release: Path) -> int:
-    return duckdb.sql(f"SELECT count(*) FROM read_parquet('{release / 'snomed_map.parquet'}')").fetchone()[0]
+    return duckdb.sql(f"SELECT count(*) FROM read_parquet('{release / 'snomed_map.parquet'}')").fetchall()[0][0]
 
 
 def test_the_snomed_bridge_cannot_be_widened_by_recovery(tmp_path: Path) -> None:
@@ -426,7 +426,7 @@ def test_the_snomed_route_is_labelled_in_the_audit_trail(tmp_path: Path, fixture
     release = tmp_path / "route_rel"
     build_vocabulary(source, None, release, athena, recover_unmapped=True)
     route = duckdb.sql(f"SELECT route FROM read_csv_auto('{release / 'recovered_codes.csv'}') "
-                       "WHERE normalized_code = 'B021'").fetchone()[0]
+                       "WHERE normalized_code = 'B021'").fetchall()[0][0]
     assert route == "snomed_bridge"
 
 

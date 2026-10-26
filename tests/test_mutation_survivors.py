@@ -279,6 +279,6 @@ def test_the_cli_passes_the_two_thresholds_distinctly(tmp_path: Path) -> None:
     # And the thresholds must actually bite differently: 1 case is enough at
     # min_cases=1 and not at min_cases=2.
     retained = lambda d: duckdb.sql(
-        f"SELECT count(*) FROM read_parquet('{d / 'phecode_counts.parquet'}') WHERE retained").fetchone()[0]
+        f"SELECT count(*) FROM read_parquet('{d / 'phecode_counts.parquet'}') WHERE retained").fetchall()[0][0]
     assert retained(out) == 1
     assert retained(out2) == 0

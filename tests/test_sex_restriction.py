@@ -38,14 +38,14 @@ def _column_tally(matrix: Path, phecode: str) -> tuple[int, int, int]:
     return duckdb.sql(
         f'SELECT count(*) FILTER (WHERE "{phecode}" = 1), count(*) FILTER (WHERE "{phecode}" = 0),'
         f'       count(*) FILTER (WHERE "{phecode}" IS NULL)'
-        f" FROM read_parquet('{matrix}')").fetchone()
+        f" FROM read_parquet('{matrix}')").fetchall()[0]
 
 
 def _counts(run: Path, phecode: str) -> tuple[int, int, bool]:
     return duckdb.sql(
         f"SELECT case_count, control_count_after_exclusions, retained"
         f" FROM read_parquet('{run / 'phecode_counts.parquet'}') WHERE phecode = '{phecode}'"
-    ).fetchone()
+    ).fetchall()[0]
 
 
 def test_counts_and_matrix_agree_for_sex_restricted_phecodes(

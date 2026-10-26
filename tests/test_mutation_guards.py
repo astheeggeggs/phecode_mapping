@@ -88,7 +88,7 @@ def test_a_null_in_excluded_phecodes_does_not_erase_every_phecode(
     assert "SS_004" not in phecodes, "the Symptoms rule should still have excluded SS_004"
 
     cases = duckdb.sql(
-        f"SELECT count(*) FROM read_parquet('{out / 'person_phecodes.parquet'}')").fetchone()[0]
+        f"SELECT count(*) FROM read_parquet('{out / 'person_phecodes.parquet'}')").fetchall()[0][0]
     assert cases == 1, "p1 is a hypertension case and must survive the unrelated exclusion"
 
 
@@ -130,11 +130,11 @@ def test_a_child_code_whose_parent_is_mapped_stays_unmapped(
                  max_unmapped_rate=1.0)
 
     cases = duckdb.sql(
-        f"SELECT count(*) FROM read_parquet('{out / 'person_phecodes.parquet'}')").fetchone()[0]
+        f"SELECT count(*) FROM read_parquet('{out / 'person_phecodes.parquet'}')").fetchall()[0][0]
     assert cases == 0, "E11.42 was mapped to its parent's phecode -- hierarchy inference is back"
 
     unmapped = duckdb.sql(
-        f"SELECT count(*) FROM read_csv_auto('{out / 'unmapped_events.csv'}')").fetchone()[0]
+        f"SELECT count(*) FROM read_csv_auto('{out / 'unmapped_events.csv'}')").fetchall()[0][0]
     assert unmapped == 1, "the child code should be reported as unmapped, not silently absorbed"
 
 
@@ -166,5 +166,5 @@ def test_punctuation_still_normalises(tmp_path: Path, parent_only_release: Path)
     out = tmp_path / "run_n"
     map_phecodes(parent_only_release, cohort, events, out, min_cases=1, min_controls=0)
     cases = duckdb.sql(
-        f"SELECT count(*) FROM read_parquet('{out / 'person_phecodes.parquet'}')").fetchone()[0]
+        f"SELECT count(*) FROM read_parquet('{out / 'person_phecodes.parquet'}')").fetchall()[0][0]
     assert cases == 1

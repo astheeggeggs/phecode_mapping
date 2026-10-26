@@ -284,5 +284,5 @@ def test_an_ambiguous_concept_produces_no_case_end_to_end_under_truncation(tmp_p
     map_phecodes(release, cohort, events, output, min_cases=1, min_controls=0, max_unmapped_rate=1.0)
 
     cases = duckdb.sql(
-        f"SELECT count(*) FROM read_parquet('{output / 'person_phecodes.parquet'}')").fetchone()[0]
+        f"SELECT count(*) FROM read_parquet('{output / 'person_phecodes.parquet'}')").fetchall()[0][0]
     assert cases == 0, "a generic poisoning code made the patient a self-harm case"

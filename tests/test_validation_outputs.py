@@ -131,7 +131,7 @@ def test_comparison_reports_control_counts_that_match_the_run(
     local = duckdb.sql(
         f"SELECT case_count, control_count_before_exclusions, control_count_after_exclusions,"
         f" excluded_control_count FROM read_parquet('{run / 'phecode_counts.parquet'}')"
-        f" WHERE phecode = 'CV_003'").fetchone()
+        f" WHERE phecode = 'CV_003'").fetchall()[0]
     assert local[3] > 0, "fixture must actually exercise an exclusion"
     assert local[1] != local[2], "before/after must differ or this test proves nothing"
 

@@ -29,7 +29,7 @@ def test_code_exclusion_is_vocabulary_specific(tmp_path: Path, release: Path) ->
     row = duckdb.sql(
         f"SELECT case_count, excluded_control_count, control_count_after_exclusions "
         f"FROM read_parquet('{output / 'phecode_counts.parquet'}') WHERE phecode='AA_1'"
-    ).fetchone()
+    ).fetchall()[0]
     assert row == (1, 0, 1)
 
 

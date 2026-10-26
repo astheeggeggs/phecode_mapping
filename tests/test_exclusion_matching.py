@@ -35,7 +35,7 @@ def _restricted(run: Path) -> tuple[int, int, int]:
     """(case_count, excluded_control_count, control_count_after_exclusions) for GU_001."""
     return duckdb.sql(
         f"SELECT case_count, excluded_control_count, control_count_after_exclusions"
-        f" FROM read_parquet('{run / 'phecode_counts.parquet'}') WHERE phecode = 'GU_001'").fetchone()
+        f" FROM read_parquet('{run / 'phecode_counts.parquet'}') WHERE phecode = 'GU_001'").fetchall()[0]
 
 
 def _run(tmp_path: Path, release: Path, name: str, *, exclusions=None, exclude_phenotypes=None) -> Path:
