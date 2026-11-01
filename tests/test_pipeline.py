@@ -29,7 +29,7 @@ def test_counts_before_and_after_exclusion_and_thresholds(tmp_path: Path, releas
     with events.open("a", newline="") as stream: csv.writer(stream).writerow(["201", "A01.1", "ICD10CM", "2020-01-01"])
     output = tmp_path / "run"
     map_phecodes(release, cohort, events, output, exclusions=exclusions)
-    row = duckdb.sql(f"SELECT * FROM read_parquet('{output / 'phecode_counts.parquet'}') WHERE phecode='AA_1'").fetchone()
+    row = duckdb.sql(f"SELECT * FROM read_parquet('{output / 'phecode_counts.parquet'}') WHERE phecode='AA_1'").fetchall()[0]
     # case, control_before, excluded, subthreshold, control_after, retained.
     # subthreshold is 0 under the default any-event rule: one event already makes a case.
     assert row[1:] == (200, 1, 1, 0, 0, False)

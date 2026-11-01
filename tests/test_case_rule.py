@@ -48,7 +48,7 @@ def _counts(run: Path, phecode: str) -> tuple:
     return duckdb.sql(
         f"SELECT case_count, control_count_before_exclusions, subthreshold_control_count,"
         f" control_count_after_exclusions"
-        f" FROM read_parquet('{run / 'phecode_counts.parquet'}') WHERE phecode = '{phecode}'").fetchone()
+        f" FROM read_parquet('{run / 'phecode_counts.parquet'}') WHERE phecode = '{phecode}'").fetchall()[0]
 
 
 def _matrix(run: Path, phecode: str) -> dict[str, int | None]:
@@ -101,7 +101,7 @@ def test_a_case_is_never_downgraded_by_the_subthreshold_rule(tmp_path: Path, ful
     run = _run(tmp_path, full_release, "two-dates")
     overlap = duckdb.sql(
         f"SELECT count(*) FROM read_parquet('{run / 'person_phecodes.parquet'}') p"
-        f" WHERE p.person_id IN ('a1','a2') AND p.phecode = 'GU_001'").fetchone()[0]
+        f" WHERE p.person_id IN ('a1','a2') AND p.phecode = 'GU_001'").fetchall()[0][0]
     assert overlap == 2
     assert _matrix(run, "GU_001")["a1"] == 1
 

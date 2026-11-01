@@ -234,5 +234,5 @@ def test_a_wrong_sex_carrier_is_not_reported_as_an_excluded_control(tmp_path: Pa
 
     excluded = duckdb.sql(
         f"SELECT excluded_control_count FROM read_parquet('{out / 'phecode_counts.parquet'}')"
-        " WHERE phecode = 'GU_001'").fetchone()[0]
+        " WHERE phecode = 'GU_001'").fetchall()[0][0]
     assert excluded == 1, f"expected only the evaluable female carrier, got {excluded}"

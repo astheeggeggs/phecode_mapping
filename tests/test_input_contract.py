@@ -158,7 +158,7 @@ def test_person_id_string_variants_do_not_collide(tmp_path: Path, full_release: 
         f"SELECT person_id FROM read_parquet('{output / 'person_phecodes.parquet'}')").fetchall()
     assert cases == [("1",)], "person_id variants collided through type coercion"
     rows = duckdb.sql(
-        f"SELECT count(*) FROM read_parquet('{output / 'phenotype_matrix.parquet'}')").fetchone()[0]
+        f"SELECT count(*) FROM read_parquet('{output / 'phenotype_matrix.parquet'}')").fetchall()[0][0]
     assert rows == 3
 
 

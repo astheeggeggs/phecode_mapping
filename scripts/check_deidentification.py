@@ -110,7 +110,9 @@ def main() -> None:
           SELECT list_sort(list(DISTINCT replace(code, '.', ''))) AS codes
           FROM events GROUP BY person_id
         """)
-        con.execute("CREATE TABLE real_norm AS SELECT list_sort(list_transform(codes, x -> replace(upper(x), '.', ''))) AS codes FROM real_sets")
+        # `lambda x:` syntax: DuckDB 2.0 rejects the old `x -> ...` arrow lambda, and the
+        # Python-style form needs DuckDB >= 1.3, which is why pyproject requires duckdb>=1.3.
+        con.execute("CREATE TABLE real_norm AS SELECT list_sort(list_transform(codes, lambda x: replace(upper(x), '.', ''))) AS codes FROM real_sets")
         total = con.execute("SELECT count(*) FROM out_sets").fetchone()[0]
         intact = con.execute("""
           SELECT count(*) FROM out_sets o
