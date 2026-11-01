@@ -43,6 +43,20 @@ UPSTREAM_PHECODEX_FILES = {
 }
 
 
+# Files this repo builds from published ones, not published themselves: `upstream` stays
+# null for them, and `derived` says what went in. scripts/build_phecodex_sex.sh fetches the
+# inputs pinned and checks it reproduces this digest.
+DERIVED_PHECODEX_FILES = {
+    "0498e20d53d7dd123b8794a15902377e3e4ddde6441713fd4e37faaceb616f3a": {
+        "file": "phecodeX_info_1.1_with_sex.csv",
+        "from": [{"version": "1.1", "file": "phecodeX_info.csv"},
+                 {"version": "1.0", "file": "phecodeX_info.csv", "column": "sex"},
+                 {"version": "1.1", "file": "PhecodeX changes.xlsx"}],
+        "built_by": "scripts/build_phecodex_sex.sh",
+    },
+}
+
+
 def _upstream(digest: str) -> dict | None:
     """Which published PhecodeX file this digest is, if it is one we recognise."""
     return UPSTREAM_PHECODEX_FILES.get(digest)
@@ -51,7 +65,10 @@ def _upstream(digest: str) -> dict | None:
 def _source_entry(path: Path) -> dict:
     """Manifest record for one source file: where it came from, and what it is."""
     digest = checksum(path)
-    return {"path": str(path), "sha256": digest, "upstream": _upstream(digest)}
+    entry = {"path": str(path), "sha256": digest, "upstream": _upstream(digest)}
+    if digest in DERIVED_PHECODEX_FILES:
+        entry["derived"] = DERIVED_PHECODEX_FILES[digest]
+    return entry
 
 
 def _columns(con, source: str) -> set[str]:

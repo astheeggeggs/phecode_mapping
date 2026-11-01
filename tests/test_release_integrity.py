@@ -259,3 +259,27 @@ def test_the_manifest_names_the_upstream_phecodex_version_of_each_source(tmp_pat
     manifest = json.loads((release / "manifest.json").read_text())
     assert manifest["phecodex_map"]["upstream"] is None
     assert manifest["phecodex_upstream_versions"] == []
+
+
+def test_a_derived_source_names_what_went_into_it(tmp_path: Path, monkeypatch) -> None:
+    """The sex-annotated info is built here, not published, so `upstream` must stay null
+    for it -- and without `derived` the manifest could not say where its sex column came
+    from. An unrecognised file gets neither key. The real digest's record names a build
+    script that exists, so the claim can be re-run."""
+    from phecodex_mapper import vocabulary
+    from phecodex_mapper.io import checksum
+
+    built = tmp_path / "with_sex.csv"
+    built.write_text("phecode,sex\nGU_614,Female\n")
+    other = tmp_path / "other.csv"
+    other.write_text("phecode,sex\nGU_614,Both\n")
+    record = {"file": "with_sex.csv", "from": [], "built_by": "scripts/build_phecodex_sex.sh"}
+    monkeypatch.setitem(vocabulary.DERIVED_PHECODEX_FILES, checksum(built), record)
+
+    entry = vocabulary._source_entry(built)
+    assert entry["upstream"] is None and entry["derived"] == record
+    assert "derived" not in vocabulary._source_entry(other)
+
+    repo = Path(__file__).resolve().parents[1]
+    for real in vocabulary.DERIVED_PHECODEX_FILES.values():
+        assert (repo / real["built_by"]).exists()
