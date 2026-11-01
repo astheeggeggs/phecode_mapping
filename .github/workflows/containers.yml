@@ -76,7 +76,10 @@ jobs:
               assert a[\"events\"] == 2, a[\"events\"]"'
 
   apptainer:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest became ubuntu-26.04 in late October 2026, which has no libfuse3-3,
+    # and apptainer 1.3.6's .deb depends on it, so the setup step failed before anything was
+    # built. Move to ubuntu-latest once an apptainer release installs there.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
