@@ -266,6 +266,43 @@ column per retained PhecodeX trait. Values are `1` for cases, `0` for ordinary
 controls, and blank/NA when a person is not evaluable because of a sex
 restriction or control exclusion.
 
+### Which phenotypes are sex-restricted
+
+The release says which: `release/phecode_info.csv` has a `sex` column, `Female`, `Male` or `Both`
+for every phecode. The matrix already leaves the other sex blank for a restricted phecode, so an
+association model fitted on it sees one sex only. Its covariates must then leave sex out: `sex` and
+any sex interaction (`age*sex`) are constant within one sex. In SAIGE, fit these with `--sex F` or
+`--sex M` and no sex terms. To list the sex-restricted phenotypes in your matrix, from the bundle
+directory:
+
+```bash
+python3 - release phecodex_run/phenotype_matrix.csv.gz <<'PY'
+import csv, gzip, sys
+release, matrix = sys.argv[1], sys.argv[2]
+sex = {r["phecode"]: r["sex"] for r in csv.DictReader(open(f"{release}/phecode_info.csv"))}
+with gzip.open(matrix, "rt") as fh:
+    traits = next(csv.reader(fh))[1:]          # the first column is person_id
+for t in traits:
+    if sex.get(t, "Both") != "Both":
+        print(t, sex[t], sep="\t")
+PY
+```
+
+It prints one line per restricted phenotype: the phecode, then `Female` or `Male`. Read
+`phecode_info.csv` with a CSV parser, as above, not by splitting on commas: some phecode names
+contain commas.
+
+**Where the labels come from.** They are PhecodeX's own: upstream's 1.0 `phecodeX_info.csv`
+carries a `sex` column, carried to 1.1 through upstream's changes workbook
+(`scripts/build_phecodex_sex.sh`; the release manifest's `phecodex_info.derived` records it).
+Upstream's rule is empirical -- a phecode is `Female` or `Male` when more than 90% of its codes'
+use in its source EHR was in that recorded sex -- and we keep it as published, so this release
+agrees with PheTK and other PhecodeX studies. A few phecodes whose codes are one-sex clinically
+are labelled `Both` under that rule, and are scored against everyone: `GU_614.55` (candidiasis
+of vulva and vagina) and `GU_603.6` (scrotal pain). Their parents, `GU_614` and `GU_603`, are
+restricted and are analysed single-sex. In an analysis that adjusts for sex, such a phecode has
+(almost) no cases in the other sex, which a fit that checks for separation refuses.
+
 Keep the matrix, unmapped events, and any person-level outputs in the secure
 environment. Share aggregate counts and `audit.json` only where permitted.
 The audit records release and input checksums, row and vocabulary counts,
@@ -650,7 +687,15 @@ sites. Analysts do not need any of this.
 ## Advanced release building
 
 Consortium maintainers can build a release from official PhecodeX files with
-`build-vocabulary`. The command accepts repeated `--phecodex-map` arguments,
+`build-vocabulary`. Its `--phecodex-info` input, `phecodeX_info_1.1_with_sex.csv`, is built first
+from pinned upstream files, and the script checks the result is byte for byte the file the
+published releases used:
+
+```bash
+bash scripts/build_phecodex_sex.sh      # writes phecodeX_info_1.1_with_sex.csv and its review file
+```
+
+Then `build-vocabulary`. The command accepts repeated `--phecodex-map` arguments,
 preserving separate `ICD10` and `ICD10CM` aliases:
 
 ```bash

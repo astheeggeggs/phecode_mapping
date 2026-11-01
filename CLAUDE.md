@@ -15,6 +15,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements-lock.txt && .venv/
 .venv/bin/pytest -k "sex and not metadata" -q
 
 # Maintainer: build a release directory from published PhecodeX files
+bash scripts/build_phecodex_sex.sh   # first: the --phecodex-info input, from pinned upstream files, checked byte for byte
 .venv/bin/phecodex-map build-vocabulary \
   --phecodex-map phecodeX_unrolled_ICD_CM.csv --phecodex-map phecodeX_unrolled_ICD_WHO.csv \
   --phecodex-info phecodeX_info_1.1_with_sex.csv \
