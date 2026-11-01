@@ -266,6 +266,32 @@ column per retained PhecodeX trait. Values are `1` for cases, `0` for ordinary
 controls, and blank/NA when a person is not evaluable because of a sex
 restriction or control exclusion.
 
+### Which phenotypes are sex-restricted
+
+The release says which: `release/phecode_info.csv` has a `sex` column, `Female`, `Male` or `Both`
+for every phecode. The matrix already leaves the other sex blank for a restricted phecode, so an
+association model fitted on it sees one sex only. Its covariates must then leave sex out: `sex` and
+any sex interaction (`age*sex`) are constant within one sex. In SAIGE, fit these with `--sex F` or
+`--sex M` and no sex terms. To list the sex-restricted phenotypes in your matrix, from the bundle
+directory:
+
+```bash
+python3 - release phecodex_run/phenotype_matrix.csv.gz <<'PY'
+import csv, gzip, sys
+release, matrix = sys.argv[1], sys.argv[2]
+sex = {r["phecode"]: r["sex"] for r in csv.DictReader(open(f"{release}/phecode_info.csv"))}
+with gzip.open(matrix, "rt") as fh:
+    traits = next(csv.reader(fh))[1:]          # the first column is person_id
+for t in traits:
+    if sex.get(t, "Both") != "Both":
+        print(t, sex[t], sep="\t")
+PY
+```
+
+It prints one line per restricted phenotype: the phecode, then `Female` or `Male`. Read
+`phecode_info.csv` with a CSV parser, as above, not by splitting on commas: some phecode names
+contain commas.
+
 Keep the matrix, unmapped events, and any person-level outputs in the secure
 environment. Share aggregate counts and `audit.json` only where permitted.
 The audit records release and input checksums, row and vocabulary counts,
