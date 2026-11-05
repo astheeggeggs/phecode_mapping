@@ -29,7 +29,7 @@ def preflight(release: Path, cohort: Path, events: Path) -> dict:
             "estimated_matrix_note": "Upper bound before event mapping, exclusions, sex restrictions, and retention thresholds."}
 
 
-def run_workflow(*, release: Path, cohort: Path, events: Path, output: Path, case_rule: str = "any-event", exclusions: Path | None = None, exclude_phenotypes: Path | None = None, min_cases: int = 200, min_controls: int = 200, max_unmapped_rate: float = 1.0) -> dict:
+def run_workflow(*, release: Path, cohort: Path, events: Path, output: Path, case_rule: str = "any-event", exclusions: Path | None = None, exclude_phenotypes: Path | None = None, min_cases: int = 200, min_controls: int = 200, max_unmapped_rate: float = 1.0, fifth_character: str = "parent") -> dict:
     if output.exists():
         raise FileExistsError(f"Output directory already exists: {output}. Remove it or choose a new --output path.")
     checks = preflight(release, cohort, events)
@@ -37,7 +37,7 @@ def run_workflow(*, release: Path, cohort: Path, events: Path, output: Path, cas
         checks["inputs"]["control_exclusions"] = {"path": str(exclusions), "sha256": checksum(exclusions)}
     if exclude_phenotypes:
         checks["inputs"]["exclude_phenotypes"] = {"path": str(exclude_phenotypes), "sha256": checksum(exclude_phenotypes)}
-    map_phecodes(release=release, cohort=cohort, events=events, output=output, case_rule=case_rule, exclusions=exclusions, min_cases=min_cases, min_controls=min_controls, max_unmapped_rate=max_unmapped_rate, exclude_phenotypes=exclude_phenotypes)
+    map_phecodes(release=release, cohort=cohort, events=events, output=output, case_rule=case_rule, exclusions=exclusions, min_cases=min_cases, min_controls=min_controls, max_unmapped_rate=max_unmapped_rate, exclude_phenotypes=exclude_phenotypes, fifth_character=fifth_character)
     audit_path = output / "audit.json"
     audit = json.loads(audit_path.read_text())
     audit["preflight"] = checks

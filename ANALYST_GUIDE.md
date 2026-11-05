@@ -176,6 +176,14 @@ The script reports how many events carry a date. If none do, it omits the `event
 column entirely, so `--case-rule two-dates` is refused rather than silently returning
 zero cases.
 
+> **Mapper 0.2.0.** WHO ICD-10 events (vocabulary `ICD10`) whose five-character code
+> the map lacks are now matched as their four-character parent when the map has that
+> parent (`--icd10-fifth-character parent`, the default; `exact` restores 0.1). This
+> applies to WHO ICD-10 only; `ICD10CM` and `ICD9CM` events are unchanged. A 0.1 matrix
+> built from WHO codes that carry the optional fifth character undercounts cases in the
+> musculoskeletal and injury chapters and should be rebuilt. `audit.json` reports the
+> events matched this way under `icd10_fifth_character`.
+>
 > **Version.** UK Biobank is WHO ICD-10, and PhecodeX has published no WHO map for
 > version 1.1 — so a UKB run is phenotyped from **PhecodeX 1.0**, whatever the release
 > directory is called. Check `phecodex_upstream_versions` in the release's
@@ -307,8 +315,8 @@ outputs must not be added to the shared analyst bundle.
 Build and test Docker locally:
 
 ```bash
-docker build -f containers/Dockerfile -t phecodex-mapper:0.1.0 .
-docker run --rm phecodex-mapper:0.1.0 --help
+docker build -f containers/Dockerfile -t phecodex-mapper:0.2.0 .
+docker run --rm phecodex-mapper:0.2.0 --help
 ```
 
 Run against local files by mounting only the secure input/output directories:
@@ -318,7 +326,7 @@ docker run --rm \
   -v "$PWD/release:/data/release:ro" \
   -v "$PWD/input:/data/input:ro" \
   -v "$PWD/output:/data/output" \
-  phecodex-mapper:0.1.0 run \
+  phecodex-mapper:0.2.0 run \
     --release /data/release \
     --cohort /data/input/cohort.csv \
     --events /data/input/events.csv \

@@ -16,6 +16,8 @@ From: python:3.11-slim
     scripts/check_deidentification.py /opt/phecodex/scripts/check_deidentification.py
     scripts/reconcile_attrition.py /opt/phecodex/scripts/reconcile_attrition.py
     scripts/deidentify_ukb_for_testing.R /opt/phecodex/scripts/deidentify_ukb_for_testing.R
+    scripts/phecodex_icd_agreement.py /opt/phecodex/scripts/phecodex_icd_agreement.py
+    scripts/rebuild_and_agreement.sh /opt/phecodex/scripts/rebuild_and_agreement.sh
 
 %post
     cd /opt/phecodex

@@ -35,7 +35,7 @@ def test_audit_unmapped_figures_describe_the_run(tmp_path: Path, full_release: P
     assert audit["events"] == 5
     assert audit["unmapped_events"] == 2
     assert audit["unmapped_rate"] == pytest.approx(2 / 5)
-    assert audit["mapping_policy"] == "exact-match-against-published-map"
+    assert audit["mapping_policy"] == "exact-match-against-published-map; icd10-fifth-character-parent-fallback"
     # The two-variant fields are gone; nothing should reintroduce them silently.
     assert "hierarchy_aware" not in audit
     assert "phenotype_matrix_exact" not in audit

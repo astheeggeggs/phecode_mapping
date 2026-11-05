@@ -185,6 +185,33 @@ curation decision rather than a gap the tool should fill, and the reasoning for
 matching exactly — with no inference from parent codes — is under
 [Mapping policy](#mapping-policy).
 
+### The optional WHO fifth character
+
+Some hospital coding systems record WHO ICD-10 codes with the optional fifth-character
+subclassification — `M10.99` (gout, site unspecified), `S52.50` (closed fracture),
+activity codes in chapter XX. The fifth character never changes the diagnosis, but the
+WHO map carries it for only some codes (1,792 of 10,405, and 1,748 of those map to
+exactly their four-character parent's phecodes). Matched exactly, `M10.99` is unmapped
+and that person becomes a *control* for `MS_703.1` Gout: on such a cohort about half the
+carriers of common musculoskeletal and injury codes were lost this way. It is a small
+share of the ~20 % WHO unmapped rate quoted above (measured: 20.2 % to 17.7 %), so the
+rate alone could never have shown it; the chapters it hits are what showed it.
+
+Since 0.2 `run` and `map-phecodes` therefore apply `--icd10-fifth-character parent` by
+default. **This applies to WHO ICD-10 only**, i.e. events labelled `ICD10`: an event
+whose five-character code the map lacks is matched as its four-character parent when the
+map has that parent. `ICD10CM` and `ICD9CM` events are never touched, because in those
+vocabularies a fifth character is part of the code, not an optional suffix. A code the map has is matched as
+written, a four-character code the map lacks stays unmapped (curated omissions are
+untouched). `audit.json` records
+the policy and, under `icd10_fifth_character`, how many events and distinct codes were
+matched via their parent, by chapter. `--icd10-fifth-character exact` restores the
+pre-0.2 behaviour; `mapping_policy` in the audit says which ran.
+
+Known harmless warning: the bundled `recommended_exclusions.csv` names `PP_P001`–`PP_P003`,
+which exist in the PhecodeX info table but have no ICD code in either map, so the rule
+matches nothing and `run` says so. The matrix is unaffected.
+
 ### Exclusion files must not have blank cells
 
 `--control-exclusions` and `--exclude-phenotypes` each take a CSV of rules. Every cell
@@ -279,6 +306,18 @@ invisible:
 | `control_exclusions.unmatched_rules` | rules that removed no one. Matching is case-sensitive, so part of a policy can silently do nothing |
 | `sex.release_has_sex_metadata` | false means **no** phecode is sex-restricted and every sex-specific phenotype is scored against the whole cohort |
 | `analysis_timezone` | pinned to UTC. Two sites must resolve a timestamp to the same calendar date or `--case-rule two-dates` gives them different case sets |
+
+### Agreement between PhecodeX and ICD-10 codes (aggregate export)
+
+`scripts/phecodex_icd_agreement.py` takes a run's `phenotype_matrix` and the same `events` and
+`cohort` files and writes one aggregate row per (PhecodeX, 3-character ICD-10 code): counts,
+Pearson r of the two 0/1 indicators over the people evaluable for that PhecodeX, the fraction of
+cases carrying the code and the fraction of carriers who are cases. Cells with fewer than
+`--min-both` (default 5) case-carriers are suppressed, so the output can leave the secure
+environment. It is what a summary-statistics resource keyed by ICD-10 code (e.g. Genebass) needs
+to be labelled with PhecodeX phenotypes. It needs pandas, numpy and scipy, which the mapper does
+not: `pip install '.[agreement]'` (or `pip install pandas numpy scipy` in the analyst
+environment). `--selftest` runs planted-phenotype checks; run it first.
 
 ## Quality control
 

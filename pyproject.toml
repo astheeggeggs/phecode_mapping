@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phecodex-mapper"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reproducible PhecodeX mapping and cohort retention tooling"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+agreement = ["pandas>=2.2", "numpy>=1.26", "scipy>=1.11"]   # scripts/phecodex_icd_agreement.py only
 phetk = ["phetk==0.3.3"]
 
 [project.scripts]

@@ -490,7 +490,8 @@ def _build_cases_and_counts(con, *, mapped_table: str, exclusions_table: str,
     con.execute(f"ALTER TABLE {counts} ADD COLUMN retained BOOLEAN; UPDATE {counts} SET retained = {retained}")
 
 
-def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_rule: str = "any-event", exclusions: Path | None = None, min_cases: int = 200, min_controls: int = 200, max_unmapped_rate: float = 1.0, exclude_phenotypes: Path | None = None) -> None:
+def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_rule: str = "any-event", exclusions: Path | None = None, min_cases: int = 200, min_controls: int = 200, max_unmapped_rate: float = 1.0, exclude_phenotypes: Path | None = None, fifth_character: str = "parent") -> None:
+    if fifth_character not in ("parent", "exact"): raise ValueError(f"fifth_character must be 'parent' or 'exact', got {fifth_character!r}")
     """Map a cohort's events to phecodes by exact match against the release's map.
 
     Mapping is exact only. The published PhecodeX map is already unrolled to leaf
@@ -564,7 +565,7 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     con.execute(f"CREATE VIEW events_input AS SELECT * FROM {event_src}")
     date_expression = "try_cast(e.event_date AS DATE)" if "event_date" in _columns(con, event_src) else "CAST(NULL AS DATE)"
     con.execute(f"""
-      CREATE TABLE normalized_events AS
+      CREATE TABLE normalized_events_raw AS
       SELECT row_number() OVER () AS event_id, c.person_id,
         upper(trim(CAST(e.vocabulary AS VARCHAR))) AS vocabulary,
         CAST(e.code AS VARCHAR) AS source_code,
@@ -576,6 +577,18 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
       FROM events_input e JOIN cohort c ON c.person_id = CAST(e.person_id AS VARCHAR)
     """)
     con.execute(f"CREATE VIEW icd_map AS SELECT * FROM read_parquet('{quote(release / 'icd_map.parquet')}')")
+    # The optional WHO ICD-10 fifth character (site, laterality, open/closed, activity) never changes
+    # the diagnosis, but some hospital systems record it and the published WHO map carries it for only
+    # some codes (1,792 of 10,405; 1,748 of those map to exactly their 4-character parent's phecodes).
+    # Matching it exactly turned about half the carriers of a common musculoskeletal code into CONTROLS.
+    # 'parent': a 5-character ICD10 code the map lacks is matched as its 4-character parent when the map
+    # has that parent; a code the map has is matched as written; a 4-character code the map lacks stays
+    # unmapped, so curated omissions are untouched.  'exact': the previous behaviour.
+    parent_case = ("""CASE WHEN r.vocabulary = 'ICD10' AND length(r.normalized_code) = 5
+               AND NOT EXISTS (SELECT 1 FROM icd_map m WHERE m.vocabulary = 'ICD10' AND m.normalized_code = r.normalized_code)
+               AND EXISTS (SELECT 1 FROM icd_map m WHERE m.vocabulary = 'ICD10' AND m.normalized_code = substr(r.normalized_code, 1, 4))
+          THEN substr(r.normalized_code, 1, 4) ELSE r.normalized_code END""" if fifth_character == "parent" else "r.normalized_code")
+    con.execute(f"CREATE TABLE normalized_events AS SELECT r.*, {parent_case} AS matched_code FROM normalized_events_raw r")
     # Trust the manifest, not the filesystem. Loading this file because it merely exists
     # meant an --icd-only release -- one built to withhold Athena-derived tables -- would
     # silently start assigning SNOMED phecodes again if a stray copy appeared beside it.
@@ -592,7 +605,7 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     con.execute("""
       CREATE TABLE mapped_events AS
       SELECT e.event_id, e.person_id, m.phecode, e.event_date FROM normalized_events e JOIN icd_map m
-       ON e.vocabulary = m.vocabulary AND e.normalized_code = m.normalized_code
+       ON e.vocabulary = m.vocabulary AND e.matched_code = m.normalized_code
     """ + (" UNION SELECT e.event_id, e.person_id, m.phecode, e.event_date FROM normalized_events e JOIN snomed_map m ON e.vocabulary = 'SNOMED' AND e.normalized_code = m.source_code" if snomed_exists else ""))
     con.execute("""
       CREATE TABLE unmapped_events AS SELECT e.* FROM normalized_events e
@@ -688,6 +701,8 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
     unmapped = con.execute("SELECT count(*) FROM unmapped_events").fetchone()[0]
     rate = unmapped / total if total else 0
     by_vocabulary = unmapped_by_vocabulary(con)
+    n_parent, k_parent = con.execute("SELECT count(*), count(DISTINCT normalized_code) FROM normalized_events WHERE matched_code <> normalized_code").fetchone()
+    parent_by_chapter = dict(con.execute("SELECT substr(normalized_code, 1, 1), count(*) FROM normalized_events WHERE matched_code <> normalized_code GROUP BY 1 ORDER BY 1").fetchall())
     audit = {"created_at_utc": dt.datetime.now(dt.UTC).isoformat(), "release": str(release), "case_rule": case_rule,
              # Pinned, not observed: two sites must resolve a timestamp to the same
              # calendar date or two-dates gives them different case sets. See io.connect.
@@ -704,7 +719,11 @@ def map_phecodes(release: Path, cohort: Path, events: Path, output: Path, case_r
              "events_for_unknown_people": dropped_unknown,
              "unmapped_events": unmapped, "unmapped_rate": rate,
              "unmapped_by_vocabulary": by_vocabulary,
-             "mapping_policy": "exact-match-against-published-map",
+             "mapping_policy": "exact-match-against-published-map" + ("; icd10-fifth-character-parent-fallback" if fifth_character == "parent" else ""),
+             # Aggregate only.  events_matched_via_parent is the number of ICD10 events that would have
+             # been unmapped under 'exact'; by_chapter says where (expect M, S, T, V-Y for hospital data).
+             "icd10_fifth_character": {"policy": fifth_character, "events_matched_via_parent": n_parent,
+                                       "distinct_codes_matched_via_parent": k_parent, "events_matched_via_parent_by_chapter": parent_by_chapter},
              # Every field here is derived. release_has_sex_metadata=false means NO
              # phecode was sex-restricted; n_unknown_sex is the count of people who
              # are non-evaluable for every restricted phecode, without which a

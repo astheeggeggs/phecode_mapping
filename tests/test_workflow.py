@@ -29,7 +29,7 @@ def test_run_workflow_writes_an_audited_matrix(tmp_path: Path, release: Path) ->
     write_csv(events, ["person_id", "code", "vocabulary"], [["p1", "123.4", "ICD9CM"]])
     output = tmp_path / "run"
     audit = run_workflow(release=release, cohort=cohort, events=events, output=output, min_cases=1, min_controls=1)
-    assert audit["mapping_policy"] == "exact-match-against-published-map"
+    assert audit["mapping_policy"] == "exact-match-against-published-map; icd10-fifth-character-parent-fallback"
     assert (output / "phenotype_matrix.csv.gz").exists()
     stored = json.loads((output / "audit.json").read_text())
     assert stored["workflow"] == "analyst-run"

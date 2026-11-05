@@ -34,6 +34,10 @@ def main() -> None:
     workflow.add_argument("--min-controls", type=int, default=200)
     workflow.add_argument("--max-unmapped-rate", type=float, default=1.0)
     workflow.add_argument("--preflight-only", action="store_true", help="Validate inputs and print the preflight report without mapping.")
+    workflow.add_argument("--icd10-fifth-character", choices=["parent", "exact"], default="parent",
+        help="WHO ICD-10 only (events labelled ICD10; ICD10CM and ICD9CM are never touched). Codes carrying the optional fifth character (M10.99): 'parent' (default) matches a "
+             "5-character code the map lacks as its 4-character parent when the map has that; 'exact' matches "
+             "only codes spelled as in the map (pre-0.2 behaviour). Recorded in audit.json.")
 
     build = commands.add_parser(
         "build-vocabulary",
@@ -120,6 +124,10 @@ def main() -> None:
     run.add_argument("--max-unmapped-rate", type=float, default=1.0,
                       help="Raise an error if the fraction of events that fail to map exceeds "
                            "this (default: 1.0, i.e. never fail).")
+    run.add_argument("--icd10-fifth-character", choices=["parent", "exact"], default="parent",
+                      help="WHO ICD-10 only (events labelled ICD10; ICD10CM and ICD9CM are never touched). Codes carrying the optional fifth character (M10.99): 'parent' (default) matches a "
+                           "5-character code the map lacks as its 4-character parent when the map has that; 'exact' matches "
+                           "only codes spelled as in the map (pre-0.2 behaviour). Recorded in audit.json.")
 
     validate = commands.add_parser(
         "validate-phecodex",
@@ -140,13 +148,13 @@ def main() -> None:
             if args.preflight_only:
                 print(json.dumps(preflight(args.release, args.cohort, args.events), indent=2, sort_keys=True))
             else:
-                audit = run_workflow(release=args.release, cohort=args.cohort, events=args.events, output=args.output, case_rule=args.case_rule, exclusions=args.control_exclusions, exclude_phenotypes=exclude_phenotypes, min_cases=args.min_cases, min_controls=args.min_controls, max_unmapped_rate=args.max_unmapped_rate)
+                audit = run_workflow(release=args.release, cohort=args.cohort, events=args.events, output=args.output, case_rule=args.case_rule, exclusions=args.control_exclusions, exclude_phenotypes=exclude_phenotypes, min_cases=args.min_cases, min_controls=args.min_controls, max_unmapped_rate=args.max_unmapped_rate, fifth_character=args.icd10_fifth_character)
                 print(json.dumps({"output": str(args.output), "mapping_policy": audit["mapping_policy"], "matrix_columns": audit.get("phenotype_matrix", {}).get("n_columns")}, indent=2))
         elif args.command == "build-vocabulary":
             build_vocabulary(args.phecodex_map, args.phecodex_info, args.output, args.athena_dir,
                              args.recover_unmapped, args.recovery_adjudication, args.icd_only)
         elif args.command == "map-phecodes":
-            map_phecodes(args.release, args.cohort, args.events, args.output, args.case_rule, args.control_exclusions, args.min_cases, args.min_controls, args.max_unmapped_rate, args.exclude_phenotypes)
+            map_phecodes(args.release, args.cohort, args.events, args.output, args.case_rule, args.control_exclusions, args.min_cases, args.min_controls, args.max_unmapped_rate, args.exclude_phenotypes, args.icd10_fifth_character)
         else:
             validate_phecodex_counts(args.run, args.release, args.external, args.output)
     except (ValueError, FileExistsError, FileNotFoundError, RuntimeError) as exc:
